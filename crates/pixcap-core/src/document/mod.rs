@@ -26,7 +26,19 @@ pub enum DocumentError {
     Json(#[from] serde_json::Error),
     #[error("unsupported document version {0}")]
     UnsupportedVersion(u32),
+    #[error("document is larger than {MAX_DOCUMENT_BYTES} bytes")]
+    TooLarge,
 }
+
+/// Largest edit file read. An estimate: a document with 1,000 annotations
+/// is about 0.5 MB, so this leaves room while bounding a hostile file.
+pub const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Most annotations kept from a document (estimate; far above hand-made use).
+const MAX_ITEMS: usize = 5_000;
+/// Most freehand points kept per annotation (estimate: minutes of drawing at 60 Hz).
+const MAX_POINTS_PER_ITEM: usize = 20_000;
+/// Longest text kept per annotation, in characters (estimate).
+const MAX_TEXT_CHARS: usize = 10_000;
 
 fn default_stroke_width() -> f64 {
     3.0
@@ -243,7 +255,17 @@ impl AnnotationDocument {
     }
 
     pub fn read(path: &str) -> Result<Self, DocumentError> {
-        Self::from_json(&fs::read_to_string(path)?)
+        use std::io::Read;
+
+        // `take` bounds the read even if the file grows after any size check.
+        let mut json = String::new();
+        fs::File::open(path)?
+            .take(MAX_DOCUMENT_BYTES + 1)
+            .read_to_string(&mut json)?;
+        if json.len() as u64 > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        Self::from_json(&json)
     }
 
     /// Pulls every number into the range the editors can produce.
@@ -275,7 +297,13 @@ impl AnnotationDocument {
             }
         }
 
+        // Counts as well as values: millions of points would hang both renderers.
+        self.items.truncate(MAX_ITEMS);
         for item in &mut self.items {
+            item.points.truncate(MAX_POINTS_PER_ITEM);
+            if let Some((cut, _)) = item.text.char_indices().nth(MAX_TEXT_CHARS) {
+                item.text.truncate(cut);
+            }
             // Slider maximums: stroke 16 (Windows), text 72 pt, blur 60.
             item.stroke_width = bounded(item.stroke_width, 0.0, 16.0, default_stroke_width());
             item.font_size = bounded(item.font_size, 1.0, 72.0, default_font_size());
@@ -307,9 +335,12 @@ fn bounded(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
 /// A path field of an edit document, resolved against the document's folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedPath {
-    /// Canonical absolute path: symlinks and `..` resolved.
+    /// Absolute path. For a file beside the document it is canonical (checked
+    /// on disk); anything else is only normalised as text and has not been
+    /// touched, so the caller must ask the user before reading it.
     pub path: String,
-    /// True when the file lies inside the edit document's own folder.
+    /// True when the file sits directly in the edit document's folder (not in
+    /// a subfolder) and is not a symlink pointing elsewhere.
     pub in_document_folder: bool,
 }
 
@@ -356,28 +387,72 @@ pub fn relative_to_sidecar(sidecar: &str, target: &str) -> String {
 ///
 /// Relative values are taken from the document's folder; absolute values,
 /// written by builds before ADR-0002, are used as they are. Returns `None`
-/// when the value is empty or the file does not exist, so the caller falls
-/// back to its default. The result is canonical, so `in_document_folder`
-/// cannot be fooled by `..` or by a symlink inside the folder pointing out.
+/// when the value is empty or unusable, so the caller falls back to its default.
+///
+/// Guard before touch: a shared document must not make the app stat or
+/// follow anything before the user agrees (a network automount path makes
+/// the system contact a remote host, telling its owner the file was opened).
+/// So the path is first normalised as text, and only a file directly beside
+/// the document is examined on disk. A sibling that is a symlink is not
+/// followed (it could point at a network share too) and counts as outside.
+/// Anything outside is returned untouched with `in_document_folder: false`,
+/// even if it does not exist, so the caller can ask before looking.
 pub fn resolve_from_sidecar(sidecar: &str, stored: &str) -> Option<ResolvedPath> {
     if stored.is_empty() || stored.contains('\0') {
         return None;
     }
 
-    let folder = Path::new(sidecar).parent()?;
+    let folder = normalize_lexically(Path::new(sidecar).parent()?)?;
     let candidate = Path::new(stored);
-    let joined = if candidate.is_absolute() {
-        candidate.to_path_buf()
+    let path = if candidate.is_absolute() {
+        normalize_lexically(candidate)?
     } else {
-        folder.join(candidate)
+        normalize_lexically(&folder.join(candidate))?
     };
 
-    let path = fs::canonicalize(joined).ok()?;
-    let folder = fs::canonicalize(folder).ok()?;
+    let outside = || {
+        Some(ResolvedPath {
+            path: path.to_str()?.to_string(),
+            in_document_folder: false,
+        })
+    };
+    if path.parent() != Some(folder.as_path()) {
+        return outside();
+    }
+    // lstat reads the entry in the document's own folder without following it.
+    if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
+        return outside();
+    }
+
+    let real = fs::canonicalize(&path).ok()?;
+    let real_folder = fs::canonicalize(&folder).ok()?;
     Some(ResolvedPath {
-        in_document_folder: path.starts_with(&folder),
-        path: path.to_str()?.to_string(),
+        in_document_folder: real.parent() == Some(real_folder.as_path()),
+        path: real.to_str()?.to_string(),
     })
+}
+
+/// `path` with `.` and `..` resolved as text, without touching the disk.
+/// `None` for a relative path or one that climbs above its root.
+fn normalize_lexically(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => out.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() || !out.has_root() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Sidecar path for an image: `shot.png` becomes `shot.pixcap.json`.
@@ -424,6 +499,30 @@ mod tests {
         assert_eq!(relative_to_sidecar(r"C:\shots\a.pixcap.json", r"D:\bg.png"), r"D:\bg.png");
     }
 
+    #[test]
+    fn oversized_documents_are_bounded() {
+        let mut document = AnnotationDocument::default();
+        let small: AnnotationRecord = serde_json::from_str(r#"{"id":"a","tool":"pen"}"#).unwrap();
+        let mut big = small.clone();
+        big.points = vec![[1.0, 1.0]; MAX_POINTS_PER_ITEM + 10];
+        big.text = "é".repeat(MAX_TEXT_CHARS + 10);
+        document.items = vec![small; MAX_ITEMS + 3];
+        document.items[0] = big;
+
+        let loaded = AnnotationDocument::from_json(&document.to_json().unwrap()).unwrap();
+        assert_eq!(loaded.items.len(), MAX_ITEMS);
+        assert_eq!(loaded.items[0].points.len(), MAX_POINTS_PER_ITEM);
+        assert_eq!(loaded.items[0].text.chars().count(), MAX_TEXT_CHARS);
+
+        let path = std::env::temp_dir().join("pixcap-oversized.pixcap.json");
+        fs::write(&path, vec![b' '; (MAX_DOCUMENT_BYTES + 1) as usize]).unwrap();
+        assert!(matches!(
+            AnnotationDocument::read(path.to_str().unwrap()),
+            Err(DocumentError::TooLarge)
+        ));
+        let _ = fs::remove_file(&path);
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolving_checks_the_real_location() {
@@ -446,14 +545,26 @@ mod tests {
         let escaped = resolve_from_sidecar(sidecar, "../elsewhere/secret.png").unwrap();
         assert!(!escaped.in_document_folder);
 
+        // Only direct siblings are trusted; a subfolder of the document's folder is not.
+        fs::create_dir_all(folder.join("old")).unwrap();
+        fs::write(folder.join("old/passport.jpg"), b"x").unwrap();
+        assert!(!resolve_from_sidecar(sidecar, "old/passport.jpg").unwrap().in_document_folder);
+
+        // Paths outside the folder are not touched, so one that does not exist still resolves as text.
+        let untouched = resolve_from_sidecar(sidecar, "/pixcap-no-such-root/share/x.png").unwrap();
+        assert_eq!(untouched.path, "/pixcap-no-such-root/share/x.png");
+        assert!(!untouched.in_document_folder);
+        assert!(resolve_from_sidecar(sidecar, "../../../../../../../../../../../../x.png").is_none());
+
         let via_link = resolve_from_sidecar(sidecar, "link.png").unwrap();
         assert!(!via_link.in_document_folder, "a symlink must not count as inside");
+        assert!(via_link.path.ends_with("captures/link.png"), "the link is not followed");
 
         let legacy = outside.join("secret.png");
         let absolute = resolve_from_sidecar(sidecar, legacy.to_str().unwrap()).unwrap();
         assert!(!absolute.in_document_folder);
 
-        assert!(resolve_from_sidecar(sidecar, "missing.png").is_none());
+        assert!(resolve_from_sidecar(sidecar, "missing.png").is_none(), "a missing sibling falls back");
         assert!(resolve_from_sidecar(sidecar, "").is_none());
 
         // What is written resolves back to the same file.

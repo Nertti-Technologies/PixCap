@@ -148,6 +148,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await ScreenRecorder.shared.start(format: format)
                     RecordingControlsController.show { self?.stopRecording() }
                     self?.recordingMenuItem?.title = "Stop Recording"
+                } catch ScreenRecorder.RecorderError.alreadyRecording {
+                    // A press while the last recording is still being saved: nothing to do.
+                } catch ScreenRecorder.RecorderError.interruptedWhileStarting {
+                    // Reported by the recorder's unexpected-stop handler.
                 } catch {
                     CaptureWorkflowManager.shared.handleFailure(error)
                 }

@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ImageIO
+import CoreImage
 
 /// Headless checks for the Phase 2 features: documents, stitching, OCR,
 /// GIF encoding, crop, and the new annotation tools.
@@ -116,6 +117,18 @@ extension SelfTest {
         _ = DocumentStore.load(sidecar: sidecarURL, confirmBackground: { _ in asked += 1; return false })
         check("a background beside the edit file loads without asking", asked == 0)
 
+        // A subfolder of the edit file's folder is not "beside" it (it may be ~/Downloads).
+        let nestedFolder = workDirectory.appendingPathComponent("old", isDirectory: true)
+        try? FileManager.default.createDirectory(at: nestedFolder, withIntermediateDirectories: true)
+        let nestedPicture = nestedFolder.appendingPathComponent("scan.png")
+        try? FileManager.default.copyItem(at: outsidePicture, to: nestedPicture)
+        var nestedConfig = config
+        nestedConfig.background = .customImage(url: nestedPicture)
+        DocumentStore.save(sourceImageURL: imageURL, config: nestedConfig, items: [])
+        asked = 0
+        _ = DocumentStore.load(sidecar: sidecarURL, confirmBackground: { _ in asked += 1; return false })
+        check("a background in a subfolder asks first", asked == 1)
+
         BackgroundTrust.defaults = realDefaults
         UserDefaults().removePersistentDomain(forName: trustSuite)
         try? FileManager.default.removeItem(at: elsewhere)
@@ -226,22 +239,9 @@ extension SelfTest {
         )
         check("stitched width is unchanged", (stitchedSize?.width ?? 0) == 200)
 
-        // MARK: GIF encoding
+        // MARK: GIF encoding (streaming, ADR-0003)
 
-        let gifURL = workDirectory.appendingPathComponent("test.gif")
-        let frames: [CGImage] = (0..<5).compactMap { index in
-            let image = solidImage(size: CGSize(width: 80, height: 60), white: CGFloat(index) / 5.0)
-            var proposed = CGRect(origin: .zero, size: image.size)
-            return image.cgImage(forProposedRect: &proposed, context: nil, hints: nil)
-        }
-        let gifWritten = ScreenRecorder.writeGIF(frames: frames, to: gifURL, frameDelay: 1.0 / 15.0)
-        check("GIF encodes", gifWritten)
-
-        if let gifSource = CGImageSourceCreateWithURL(gifURL as CFURL, nil) {
-            check("GIF holds every frame", CGImageSourceGetCount(gifSource) == 5)
-        } else {
-            check("GIF is readable", false)
-        }
+        runGIFChecks(in: workDirectory, check)
 
         // MARK: OCR
 
@@ -411,6 +411,99 @@ extension SelfTest {
         }
 
         return context.makeImage()!
+    }
+
+    private static func runGIFChecks(in directory: URL, _ check: (String, @autoclosure () -> Bool) -> Void) {
+        let context = CIContext()
+
+        // Orientation and round trip: red on top, blue below, scaled 80x60 -> 40x30.
+        let source = CIImage(color: CIColor(red: 0, green: 0, blue: 1))
+            .cropped(to: CGRect(x: 0, y: 0, width: 80, height: 60))
+        let top = CIImage(color: CIColor(red: 1, green: 0, blue: 0))
+            .cropped(to: CGRect(x: 0, y: 30, width: 80, height: 30))
+        let frame = StreamingGIFWriter.rgba(from: top.composited(over: source), width: 40, height: 30, context: context)
+
+        let gifURL = directory.appendingPathComponent("test.gif")
+        var writerDropped = 0
+        if let writer = StreamingGIFWriter(url: gifURL, width: 40, height: 30, frameDelay: 1.0 / 15.0) {
+            // Five frames captured 1/15 s apart but sent at once, so some may be
+            // dropped (the backlog holds 4). After a pause a frame captured 2 s
+            // later (a static screen in between) is always kept. Each frame
+            // shows until the next kept one, so playback is 2 s + one interval.
+            for index in 0..<5 { writer.enqueue(frame, at: Double(index) / 15) }
+            usleep(500_000)
+            check("GIF keeps a frame once the encoder catches up", writer.enqueue(frame, at: 2))
+            check("GIF encodes", writer.finish(keep: true))
+            writerDropped = writer.dropped
+        } else {
+            check("GIF writer opens", false)
+        }
+
+        if let gifSource = CGImageSourceCreateWithURL(gifURL as CFURL, nil),
+           let first = CGImageSourceCreateImageAtIndex(gifSource, 0, nil) {
+            let count = CGImageSourceGetCount(gifSource)
+            check("GIF holds every frame it accepted", count == 6 - writerDropped)
+            let playback = (0..<count).reduce(0.0) { total, index in
+                let properties = CGImageSourceCopyPropertiesAtIndex(gifSource, index, nil) as? [CFString: Any]
+                let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+                return total + ((gif?[kCGImagePropertyGIFUnclampedDelayTime] ?? gif?[kCGImagePropertyGIFDelayTime]) as? Double ?? 0)
+            }
+            check("GIF plays in real time despite drops and idle gaps (2.07 s)", abs(playback - (2 + 1.0 / 15)) < 0.015)
+            check("GIF frame has the requested size", first.width == 40 && first.height == 30)
+            let corner = topLeftPixel(of: first)
+            check("GIF frame is upright (red on top)", corner.red > 200 && corner.blue < 60)
+        } else {
+            check("GIF is readable", false)
+        }
+
+        // A cancelled recording leaves no file.
+        let cancelledURL = directory.appendingPathComponent("cancelled.gif")
+        if let writer = StreamingGIFWriter(url: cancelledURL, width: 40, height: 30, frameDelay: 0.1) {
+            writer.enqueue(frame, at: 0)
+            check("cancelled GIF reports no file", !writer.finish(keep: false))
+        }
+        check("cancelled GIF leaves nothing", !FileManager.default.fileExists(atPath: cancelledURL.path))
+
+        // Memory stays flat: 150 full-size frames, against about +724 MB on the
+        // old ImageIO path (measured 2026-11-25). 100 MB is an estimate of headroom.
+        let (width, height) = (900, 506)
+        let big = StreamingGIFWriter.rgba(from: CIImage(cgImage: tallPage(width: width, height: height)), width: width, height: height, context: context)
+        let start = residentBytes()
+        var peak = start
+        if let writer = StreamingGIFWriter(url: directory.appendingPathComponent("long.gif"), width: width, height: height, frameDelay: 1.0 / 15.0) {
+            for index in 0..<150 {
+                while !writer.enqueue(big, at: Double(index) / 15) { usleep(2_000) }
+                peak = max(peak, residentBytes())
+            }
+            check("long GIF encodes", writer.finish(keep: true))
+            peak = max(peak, residentBytes())
+        }
+        let growthMB = Double(peak &- start) / 1_048_576
+        print(String(format: "  long GIF: 150 frames, peak growth %.0f MB", growthMB))
+        check("GIF memory stays flat (< 100 MB for 150 frames)", growthMB < 100)
+    }
+
+    private static func topLeftPixel(of image: CGImage) -> (red: Int, blue: Int) {
+        var pixel = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        guard let context = CGContext(
+            data: &pixel, width: image.width, height: image.height, bitsPerComponent: 8,
+            bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return (0, 0) }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        // Bitmap row 0 is the top of the image.
+        return (Int(pixel[0]), Int(pixel[2]))
+    }
+
+    private static func residentBytes() -> UInt64 {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let status = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return status == KERN_SUCCESS ? info.resident_size : 0
     }
 
     private static func solidImage(size: CGSize, white: CGFloat) -> NSImage {

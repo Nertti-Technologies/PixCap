@@ -67,29 +67,35 @@ pub fn resolve_filename(pattern: &str, context: &CaptureContext) -> String {
     result
 }
 
-/// Longest value one placeholder may contribute, in characters.
+/// Longest value one placeholder may contribute, in UTF-8 bytes.
 ///
-/// An estimate: file names are capped at 255 bytes on APFS and NTFS, and a
-/// pattern can hold several placeholders plus a date and an extension.
-const MAX_VALUE_CHARS: usize = 80;
+/// An estimate: file names are capped at 255 bytes on APFS (NTFS: 255 UTF-16
+/// units, which UTF-8 bytes never undercount), and a pattern can hold both
+/// `{app}` and `{title}` plus a date, a counter and an extension. Counting
+/// characters let 80 emoji take 320 bytes.
+const MAX_VALUE_BYTES: usize = 80;
 
 /// Makes text from outside PixCap safe to embed in a file name.
 ///
 /// Path separators, `:` (a separator in macOS Finder), characters Windows
 /// forbids, and control characters become `-`; leading dots and spaces are
-/// dropped so the result can be neither hidden nor `.`/`..`.
+/// dropped so the result can be neither hidden nor `.`/`..`, and trailing
+/// dots and spaces too, which Windows strips silently.
 pub fn file_name_safe(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .map(|c| match c {
+    let mut cleaned = String::new();
+    for c in value.chars() {
+        let c = match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
             c if c.is_control() => '-',
             c => c,
-        })
-        .take(MAX_VALUE_CHARS)
-        .collect();
+        };
+        if cleaned.len() + c.len_utf8() > MAX_VALUE_BYTES {
+            break;
+        }
+        cleaned.push(c);
+    }
 
-    let trimmed = cleaned.trim_start_matches(['.', ' ']).trim_end();
+    let trimmed = cleaned.trim_start_matches(['.', ' ']).trim_end_matches(['.', ' ']);
     if trimmed.is_empty() {
         "Untitled".to_string()
     } else {
@@ -160,6 +166,12 @@ mod tests {
     #[test]
     fn long_titles_are_capped() {
         let resolved = resolve_filename("{title}", &context_with_title(&"x".repeat(500)));
-        assert_eq!(resolved.chars().count(), MAX_VALUE_CHARS);
+        assert_eq!(resolved.len(), MAX_VALUE_BYTES);
+
+        // Multi-byte text is cut by bytes, on a character boundary.
+        let emoji = resolve_filename("{title}", &context_with_title(&"📷".repeat(100)));
+        assert!(emoji.len() <= MAX_VALUE_BYTES && emoji.chars().all(|c| c == '📷'));
+
+        assert_eq!(resolve_filename("{title}", &context_with_title("report. . ")), "report");
     }
 }

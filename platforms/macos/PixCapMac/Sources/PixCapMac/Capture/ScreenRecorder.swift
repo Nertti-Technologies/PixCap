@@ -3,14 +3,12 @@ import AppKit
 import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
-import ImageIO
-import UniformTypeIdentifiers
 
-/// Records the screen to MP4 (AVAssetWriter) or animated GIF (ImageIO).
+/// Records the screen to MP4 (AVAssetWriter) or animated GIF (the Rust core).
 ///
 /// Frames arrive from a `SCStream`; MP4 recordings append sample buffers
 /// directly, while GIF recordings sample frames down to the configured GIF rate
-/// and encode on stop.
+/// and stream them to a `StreamingGIFWriter`, so memory stays flat (ADR-0003).
 @available(macOS 14.0, *)
 public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelegate {
     public static let shared = ScreenRecorder()
@@ -27,6 +25,8 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         case noDisplay
         case writerSetupFailed(String)
         case nothingRecorded
+        /// The stream failed while starting; its stop handler reports the outcome.
+        case interruptedWhileStarting
 
         public var errorDescription: String? {
             switch self {
@@ -34,6 +34,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
             case .noDisplay: return "No display available to record."
             case .writerSetupFailed(let reason): return "Could not start the recorder: \(reason)"
             case .nothingRecorded: return "No frames were captured."
+            case .interruptedWhileStarting: return "The recording stopped as it started."
             }
         }
     }
@@ -44,14 +45,26 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
 
     private let queue = DispatchQueue(label: "app.pixcap.recorder")
 
-    /// True from the moment `start` claims the recorder until `stop` releases it.
+    private enum Phase { case idle, active, finishing }
+
+    /// Where the recorder is in its life: `start` claims it from `.idle`,
+    /// the first stop moves it to `.finishing`, and it returns to `.idle`
+    /// only once the file is complete.
     ///
     /// Read and written only on `queue`, so start/stop are each one atomic
-    /// check-and-set. `isRecording` (main actor, for the UI) flips only after
-    /// the stream is running, which left a window where a double hotkey press
-    /// started two streams, or a user stop and a stream-error stop both called
-    /// `finishWriting` (an AVFoundation exception that kills the app).
-    private var isActive = false
+    /// check-and-set. `isRecording` (main actor, for the UI) changes at other
+    /// moments, so relying on it let a double hotkey press start two streams,
+    /// let a user stop and a stream-error stop both call `finishWriting` (an
+    /// AVFoundation exception that kills the app), or let a new recording
+    /// start while the previous one was still being written and take over
+    /// its writer and file.
+    private var phase = Phase.idle
+    /// Numbers each claimed recording, so a slow start can tell whether the
+    /// recorder still belongs to it. Read and written only on `queue`.
+    private var recordingID = 0
+
+    /// Samples are used only while recording, not while finishing. Call on `queue`.
+    private var isActive: Bool { phase == .active }
 
     /// Called on the main actor when the stream stops on its own (for example
     /// the recorded display was unplugged), with the finished file or nil.
@@ -77,12 +90,20 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     private var pausedOffset: CMTime = .zero
     private var lastPresentationTime: CMTime = .zero
 
-    // GIF accumulation
-    private var gifFrames: [CGImage] = []
+    // GIF streaming. `gifWriter` is set before the stream starts and cleared
+    // after it stops, so the sample queue never races its assignment.
+    private var gifWriter: StreamingGIFWriter?
+    private var gifFramesSent = 0
     private var gifFrameInterval: Double = 1.0 / 15.0
     private var lastGIFCapture: CMTime = .negativeInfinity
-    private var gifMaxWidth: CGFloat = 900
-    /// Hard cap so a forgotten recording cannot exhaust memory.
+    /// GIF frames are scaled to fit within this size, in pixels. The height
+    /// limit matches `MAX_GIF_SIDE` in the core's gif_writer.rs, which
+    /// refuses larger frames; change both together.
+    private let gifMaxWidth = 900
+    private let gifMaxHeight = 4096
+    /// Caps the frames kept: 60 s of changing screen at 15 fps (static
+    /// stretches add no frames). The core's own cap is higher (3,600) and only
+    /// guards against misuse.
     private let gifFrameLimit = 900
 
     private override init() {
@@ -98,22 +119,30 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         region: CGRect? = nil
     ) async throws {
         guard ScreenCaptureEngine.shared.ensurePermission() else { throw CaptureError.permissionDenied }
-        let claimed = queue.sync { () -> Bool in
-            guard !isActive else { return false }
-            isActive = true
-            return true
+        let claimed = queue.sync { () -> Int? in
+            guard phase == .idle else { return nil }
+            phase = .active
+            recordingID += 1
+            return recordingID
         }
-        guard claimed else { throw RecorderError.alreadyRecording }
+        guard let id = claimed else { throw RecorderError.alreadyRecording }
 
         do {
-            try await startClaimed(format: format, screen: screen, region: region)
+            try await startClaimed(id: id, format: format, screen: screen, region: region)
+        } catch RecorderError.interruptedWhileStarting {
+            // The error stop already claimed and is finishing this recording.
+            throw RecorderError.interruptedWhileStarting
         } catch {
+            // Clean up only if this start still owns the recording; a stream
+            // error may have claimed it meanwhile, and then its stop finishes
+            // the file and reports to the user.
+            guard claimStop(id: id) else { throw RecorderError.interruptedWhileStarting }
             discardFailedStart()
             throw error
         }
     }
 
-    private func startClaimed(format: RecordingFormat, screen: NSScreen?, region: CGRect?) async throws {
+    private func startClaimed(id: Int, format: RecordingFormat, screen: NSScreen?, region: CGRect?) async throws {
         // Cleared first so a failed start never deletes the previous recording's file.
         outputURL = nil
 
@@ -128,7 +157,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         }
 
         self.format = format
-        gifFrames.removeAll()
+        gifFramesSent = 0
         lastGIFCapture = .negativeInfinity
         pausedOffset = .zero
         pausedAt = nil
@@ -173,7 +202,13 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         if format == .mp4 {
             try setUpWriter(url: url, width: configuration.width, height: configuration.height, withAudio: wantsAudio)
         } else {
-            gifMaxWidth = min(900, CGFloat(configuration.width))
+            let fit = min(1, Double(gifMaxWidth) / Double(configuration.width), Double(gifMaxHeight) / Double(configuration.height))
+            let width = max(1, Int((Double(configuration.width) * fit).rounded()))
+            let height = max(1, Int((Double(configuration.height) * fit).rounded()))
+            guard let gifWriter = StreamingGIFWriter(url: url, width: width, height: height, frameDelay: gifFrameInterval) else {
+                throw RecorderError.writerSetupFailed("could not create the GIF file")
+            }
+            self.gifWriter = gifWriter
         }
 
         // PixCap's own windows stay out of the recording.
@@ -186,6 +221,13 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         }
         try await stream.startCapture()
+
+        // A stream error during startCapture may already have stopped this
+        // recording; that stop owns the cleanup and the report to the user.
+        guard queue.sync(execute: { phase == .active && recordingID == id }) else {
+            try? await stream.stopCapture()
+            throw RecorderError.interruptedWhileStarting
+        }
         self.stream = stream
 
         await MainActor.run {
@@ -203,21 +245,24 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         // step that can throw, so there is never a live stream to stop here.
         writer?.cancelWriting()
         writer = nil
+        _ = gifWriter?.finish(keep: false)
+        gifWriter = nil
         videoInput = nil
         audioInput = nil
         if let outputURL {
             try? FileManager.default.removeItem(at: outputURL)
             self.outputURL = nil
         }
-        queue.sync { isActive = false }
+        queue.sync { phase = .idle }
     }
 
-    /// Atomically releases the recorder. True only for the one caller that should finish it.
-    private func claimStop() -> Bool {
+    /// Atomically moves the recorder to finishing. True only for the one caller
+    /// that should finish it; with `id`, only if that recording is still the current one.
+    private func claimStop(id: Int? = nil) -> Bool {
         queue.sync {
-            let wasActive = isActive
-            isActive = false
-            return wasActive
+            guard phase == .active, id == nil || id == recordingID else { return false }
+            phase = .finishing
+            return true
         }
     }
 
@@ -230,6 +275,14 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     }
 
     private func finish() async -> URL? {
+        let url = await finishOutput()
+        // Only now may a new recording start: until here this one still owns
+        // the writer, the stream and `outputURL`.
+        queue.sync { phase = .idle }
+        return url
+    }
+
+    private func finishOutput() async -> URL? {
         try? await stream?.stopCapture()
         stream = nil
         // Let any sample callback already running on the queue finish before
@@ -341,37 +394,13 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     }
 
     private func finishGIF() -> URL? {
-        let frames = queue.sync { gifFrames }
-        guard !frames.isEmpty, let url = outputURL else { return nil }
-
-        let written = Self.writeGIF(frames: frames, to: url, frameDelay: gifFrameInterval)
-        queue.sync { gifFrames.removeAll() }
-        return written ? url : nil
-    }
-
-    /// Encodes frames into a looping GIF.
-    static func writeGIF(frames: [CGImage], to url: URL, frameDelay: Double) -> Bool {
-        guard let destination = CGImageDestinationCreateWithURL(
-            url as CFURL,
-            UTType.gif.identifier as CFString,
-            frames.count,
-            nil
-        ) else { return false }
-
-        let fileProperties = [
-            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]
-        ] as CFDictionary
-        CGImageDestinationSetProperties(destination, fileProperties)
-
-        let frameProperties = [
-            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: frameDelay]
-        ] as CFDictionary
-
-        for frame in frames {
-            CGImageDestinationAddImage(destination, frame, frameProperties)
-        }
-
-        return CGImageDestinationFinalize(destination)
+        guard let gifWriter else { return nil }
+        self.gifWriter = nil
+        // Waits for at most `maxBacklog` queued frames, then writes the trailer.
+        let written = gifWriter.finish(keep: true)
+        let dropped = gifWriter.dropped
+        if dropped > 0 { NSLog("PixCap: GIF encoder fell behind; %d frames dropped", dropped) }
+        return written ? outputURL : nil
     }
 
     // MARK: - SCStreamOutput
@@ -465,7 +494,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     }
 
     private func appendGIFFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard gifFrames.count < gifFrameLimit else { return }
+        guard let gifWriter, gifFramesSent < gifFrameLimit else { return }
 
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if lastGIFCapture != .negativeInfinity {
@@ -475,17 +504,16 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         lastGIFCapture = time
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = gifContext
-
-        let scale = min(1, gifMaxWidth / max(ciImage.extent.width, 1))
-        let scaled = scale < 1
-            ? ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            : ciImage
-
-        if let cgImage = context.createCGImage(scaled, from: scaled.extent) {
-            gifFrames.append(cgImage)
-        }
+        let rgba = StreamingGIFWriter.rgba(
+            from: CIImage(cvPixelBuffer: pixelBuffer),
+            width: gifWriter.width,
+            height: gifWriter.height,
+            context: gifContext
+        )
+        // Paused time is removed so a pause leaves no gap in playback.
+        let captured = CMTimeGetSeconds(CMTimeSubtract(time, pausedOffset))
+        gifWriter.enqueue(rgba, at: captured)
+        gifFramesSent += 1
     }
 
     // MARK: - Helpers

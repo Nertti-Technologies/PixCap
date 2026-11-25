@@ -203,9 +203,11 @@ pub fn render_document(
     })
 }
 
-/// Renders a document into a pixmap, for callers that want the raw pixels.
 /// Largest width or height of an image PixCap opens, stitches or renders.
 /// 32768 covers an 8K display (7680 px) captured at 2x, and then some.
+/// The macOS renderer applies this and `MAX_CANVAS_PIXELS` to background
+/// pictures (`maxBackgroundSide`/`maxBackgroundPixels` in
+/// BeautifierRenderer.swift); change both together.
 pub const MAX_IMAGE_SIDE: u32 = 32_768;
 
 /// Largest canvas, in pixels, a render may allocate: 1 GiB of RGBA (2^28 px x 4 bytes).
@@ -216,6 +218,7 @@ pub const MAX_IMAGE_SIDE: u32 = 32_768;
 /// below `i32::MAX` (2^30 < 2^31), which the blur and grain loops rely on.
 pub const MAX_CANVAS_PIXELS: u64 = 1 << 28;
 
+/// Renders a document into a pixmap, for callers that want the raw pixels.
 pub fn render_to_pixmap(
     source: &DynamicImage,
     document: &AnnotationDocument,

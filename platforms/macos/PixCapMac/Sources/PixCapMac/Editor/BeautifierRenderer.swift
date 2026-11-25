@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreImage
+import ImageIO
 import CoreImage.CIFilterBuiltins
 
 /// Window chrome drawn around the captured image.
@@ -306,10 +307,33 @@ public enum BeautifierRenderer {
             }
 
         case .customImage(let url):
-            if let custom = NSImage(contentsOf: url) {
+            if let custom = boundedImage(at: url) {
                 drawScaledToFill(custom, in: context, rect: canvasRect, blur: config.backgroundBlur)
             }
         }
+    }
+
+    /// Largest picture side and pixel count decoded for a background. Match
+    /// `MAX_IMAGE_SIDE` and `MAX_CANVAS_PIXELS` in the core's render/mod.rs,
+    /// which bound source images and canvases the same way; change both together.
+    static let maxBackgroundSide = 32_768
+    static let maxBackgroundPixels = 1 << 28
+
+    /// Loads a background picture only if its header says it is a sane size,
+    /// so a tiny file claiming 100,000 x 100,000 pixels (a decompression bomb
+    /// named by a shared edit file) is never decoded. Decodes that same first
+    /// image, not whichever representation NSImage would pick from a
+    /// multi-image TIFF or ICO.
+    private static func boundedImage(at url: URL) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              (1...maxBackgroundSide).contains(width),
+              (1...maxBackgroundSide).contains(height),
+              width * height <= maxBackgroundPixels,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: width, height: height))
     }
 
     private static func drawFill(_ fill: BackgroundFill, in context: CGContext, rect: CGRect) {

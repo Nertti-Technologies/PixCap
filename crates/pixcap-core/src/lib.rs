@@ -3,6 +3,7 @@ pub mod canvas;
 pub mod document;
 pub mod export;
 pub mod fsutil;
+pub mod gif_writer;
 pub mod history;
 pub mod naming;
 pub mod redaction;
@@ -20,6 +21,7 @@ pub use render::{layout as render_layout, render_document, render_to_pixmap, Lay
 pub use stitch::{stitch_files, stitch_vertical, StitchError, StitchOptions};
 pub use canvas::{CanvasLayout, ContainerSizing, DropShadowConfig, PaddingConfig, WindowFrameStyle};
 pub use fsutil::write_atomic;
+pub use gif_writer::{GifWriteError, GifWriter};
 pub use export::{CodeRenderer, ExportError, RenderOptions};
 pub use history::{HistoryDb, ScreenshotRecord};
 pub use naming::{default_pattern, resolve_filename, CaptureContext};

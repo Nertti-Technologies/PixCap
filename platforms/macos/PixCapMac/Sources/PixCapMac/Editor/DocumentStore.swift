@@ -231,12 +231,16 @@ public enum DocumentStore {
         }
 
         let url = URL(fileURLWithPath: resolved.path)
-        if resolved.in_document_folder || BackgroundTrust.isTrusted(resolved.path) {
+        if resolved.in_document_folder {
             return url
         }
-        guard confirm(url) else { return nil }
-        BackgroundTrust.remember(url)
-        return url
+        // A path outside the folder has not been looked at yet. Only once the
+        // user trusts it (now or before) may the app check that it exists.
+        if !BackgroundTrust.isTrusted(resolved.path) {
+            guard confirm(url) else { return nil }
+            BackgroundTrust.remember(url)
+        }
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     private static func decode(_ record: AnnotationRecordDTO) -> AnnotationItem {

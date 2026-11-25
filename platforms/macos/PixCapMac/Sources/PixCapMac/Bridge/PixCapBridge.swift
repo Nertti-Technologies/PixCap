@@ -38,6 +38,16 @@ func pixcap_history_delete(_ handle: OpaquePointer?, _ id: Int64) -> Int32
 @_silgen_name("pixcap_history_toggle_favorite")
 func pixcap_history_toggle_favorite(_ handle: OpaquePointer?, _ id: Int64) -> Int32
 
+// Streaming GIF writer (ADR-0003). A handle must be finished exactly once.
+@_silgen_name("pixcap_gif_begin")
+func pixcap_gif_begin(_ path: UnsafePointer<CChar>?, _ width: UInt32, _ height: UInt32) -> OpaquePointer?
+
+@_silgen_name("pixcap_gif_add_frame")
+func pixcap_gif_add_frame(_ handle: OpaquePointer?, _ rgba: UnsafePointer<UInt8>?, _ len: Int, _ width: UInt32, _ height: UInt32, _ delayCs: UInt32) -> Int32
+
+@_silgen_name("pixcap_gif_finish")
+func pixcap_gif_finish(_ handle: OpaquePointer?, _ keep: Int32) -> Int32
+
 @_silgen_name("pixcap_syntax_languages_json")
 func pixcap_syntax_languages_json() -> UnsafeMutablePointer<CChar>?
 

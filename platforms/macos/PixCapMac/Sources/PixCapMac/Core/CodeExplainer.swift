@@ -30,6 +30,26 @@ public enum CodeExplainer {
         return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
     }
 
+    /// Session for every request: refuses redirects, so a process listening on
+    /// the loopback port cannot bounce the request (and the user's code) to
+    /// another host.
+    private static let session = URLSession(
+        configuration: .ephemeral,
+        delegate: NoRedirects(),
+        delegateQueue: nil
+    )
+
+    private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest
+        ) async -> URLRequest? {
+            nil
+        }
+    }
+
     public static var model: String {
         Settings.string(SettingsKey.ollamaModel, default: "llama3.2")
     }
@@ -71,7 +91,7 @@ public enum CodeExplainer {
         var request = URLRequest(url: endpoint.appendingPathComponent("api/tags"))
         request.timeoutInterval = 2
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let tags = try? JSONDecoder().decode(TagsResponse.self, from: data) else {
             return nil
@@ -144,7 +164,7 @@ public enum CodeExplainer {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             throw ExplainError.requestFailed(error.localizedDescription)
         }

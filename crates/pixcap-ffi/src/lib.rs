@@ -1,5 +1,5 @@
 use pixcap_core::{
-    AnnotationDocument, CaptureContext, CodeRenderer, HistoryDb, RenderOptions, ScreenshotRecord,
+    AnnotationDocument, GifWriter, CaptureContext, CodeRenderer, HistoryDb, RenderOptions, ScreenshotRecord,
     ThemePresets,
 };
 use std::ffi::{CStr, CString};
@@ -403,9 +403,12 @@ pub unsafe extern "C" fn pixcap_document_relative_path(
 
 /// Resolves a stored path field of the edit document at `sidecar_path`.
 ///
-/// Returns `{"path": "...", "in_document_folder": bool}` with a canonical
-/// path, or null when the value is empty or the file does not exist. The
-/// caller owns the returned string and must free it with `pixcap_free_string`.
+/// Returns `{"path": "...", "in_document_folder": bool}`, or null when the
+/// value is empty or unusable. A file directly beside the document is checked
+/// on disk (null if missing); any other path is only normalised as text and
+/// may not exist, because it must not be touched until the user agrees (see
+/// `pixcap_core::document::resolve_from_sidecar`). The caller owns the
+/// returned string and must free it with `pixcap_free_string`.
 ///
 /// # Safety
 /// Both arguments must be valid, null-terminated C strings.
@@ -624,6 +627,102 @@ pub unsafe extern "C" fn pixcap_stitch_scroll_frames(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Streaming GIF recording (ADR-0003)
+// ---------------------------------------------------------------------------
+//
+// A handle wraps one open file and is not thread-safe: callers must confine
+// all calls for one handle to one thread or serial queue.
+
+/// Starts a looping GIF at `path`, every frame `width` x `height` pixels.
+///
+/// Returns an opaque handle, or null on failure. Every handle must be passed
+/// to `pixcap_gif_finish` exactly once, which frees it.
+///
+/// # Safety
+/// `path` must be a valid, null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn pixcap_gif_begin(
+    path: *const c_char,
+    width: c_uint,
+    height: c_uint,
+) -> *mut GifWriter {
+    guard(std::ptr::null_mut(), || {
+        let Some(path) = opt_str(path) else {
+            return std::ptr::null_mut();
+        };
+        match GifWriter::create(path, width, height) {
+            Ok(writer) => Box::into_raw(Box::new(writer)),
+            Err(error) => {
+                eprintln!("pixcap: could not start a GIF: {error}");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Encodes and writes one frame: `len` bytes of RGBA, row-major, no row
+/// padding, shown for `delay_cs` centiseconds.
+///
+/// Returns 0 on success, -1 on failure. The handle stays valid either way, but
+/// after a write failure the file is incomplete and finishing it fails.
+///
+/// # Safety
+/// `handle` must come from `pixcap_gif_begin` and not yet be finished;
+/// `rgba` must point to at least `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn pixcap_gif_add_frame(
+    handle: *mut GifWriter,
+    rgba: *const u8,
+    len: usize,
+    width: c_uint,
+    height: c_uint,
+    delay_cs: c_uint,
+) -> c_int {
+    guard(-1, || {
+        let Some(writer) = handle.as_mut() else {
+            return -1;
+        };
+        if rgba.is_null() {
+            return -1;
+        }
+        let pixels = std::slice::from_raw_parts(rgba, len);
+        match writer.add_frame(pixels, width, height, delay_cs) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
+    })
+}
+
+/// Ends a GIF and frees the handle.
+///
+/// With `keep` non-zero the file is completed and moved into place; with
+/// `keep` zero (a cancelled recording) it is deleted. Returns 0 on success,
+/// -1 on failure, in which case no file is left at the path.
+///
+/// # Safety
+/// `handle` must come from `pixcap_gif_begin` and not have been finished.
+#[no_mangle]
+pub unsafe extern "C" fn pixcap_gif_finish(handle: *mut GifWriter, keep: c_int) -> c_int {
+    guard(-1, || {
+        if handle.is_null() {
+            return -1;
+        }
+        let writer = Box::from_raw(handle);
+        if keep == 0 {
+            drop(writer);
+            return 0;
+        }
+        match writer.finish() {
+            Ok(_) => 0,
+            Err(error) => {
+                eprintln!("pixcap: could not finish a GIF: {error}");
+                -1
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,6 +732,36 @@ mod tests {
         let value = CStr::from_ptr(ptr).to_string_lossy().into_owned();
         pixcap_free_string(ptr);
         value
+    }
+
+    #[test]
+    fn gif_handle_lifecycle_through_the_c_abi() {
+        let dir = std::env::temp_dir().join("pixcap-ffi-gif-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rec.gif");
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+        let pixels = [120u8; 4 * 4 * 4];
+
+        unsafe {
+            let handle = pixcap_gif_begin(path_c.as_ptr(), 4, 4);
+            assert!(!handle.is_null());
+            assert_eq!(pixcap_gif_add_frame(handle, pixels.as_ptr(), pixels.len(), 4, 4, 10), 0);
+            assert_eq!(pixcap_gif_add_frame(handle, pixels.as_ptr(), 3, 4, 4, 10), -1, "short buffer");
+            assert_eq!(pixcap_gif_add_frame(handle, std::ptr::null(), 64, 4, 4, 10), -1, "null buffer");
+            assert_eq!(pixcap_gif_finish(handle, 1), 0);
+            assert!(path.exists());
+
+            let cancelled = CString::new(dir.join("cancel.gif").to_str().unwrap()).unwrap();
+            let handle = pixcap_gif_begin(cancelled.as_ptr(), 4, 4);
+            assert_eq!(pixcap_gif_add_frame(handle, pixels.as_ptr(), pixels.len(), 4, 4, 10), 0);
+            assert_eq!(pixcap_gif_finish(handle, 0), 0);
+            assert!(!dir.join("cancel.gif").exists());
+
+            assert!(pixcap_gif_begin(path_c.as_ptr(), 0, 4).is_null());
+            assert_eq!(pixcap_gif_finish(std::ptr::null_mut(), 1), -1);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

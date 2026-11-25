@@ -5,8 +5,14 @@ import Foundation
 ///
 /// An edit file can come from someone else, and its background path could
 /// name any picture on this Mac, which would then be drawn into the export.
-/// A picture is used without asking only when it sits in the edit file's own
-/// folder or the user picked it on this Mac before; anything else needs a yes.
+/// A picture is used without asking only when it sits directly in the edit
+/// file's own folder or the user picked it on this Mac before; anything else
+/// needs a yes.
+///
+/// Paths are compared as normalised text, never looked up on disk: checking
+/// a path from a shared file before the user agrees would already touch it
+/// (a network path makes the system contact that host). The core resolves
+/// document paths the same way (`resolve_from_sidecar`).
 @available(macOS 14.0, *)
 enum BackgroundTrust {
 
@@ -19,15 +25,15 @@ enum BackgroundTrust {
 
     /// Records a picture the user chose, so their own edits reopen without a prompt.
     static func remember(_ url: URL) {
-        guard let path = canonicalPath(url.path) else { return }
+        let path = normalizedPath(url.path)
         var paths = stored.filter { $0 != path }
         paths.append(path)
         defaults.set(Array(paths.suffix(limit)), forKey: SettingsKey.trustedBackgroundImages)
     }
 
-    /// True when `canonicalPath` was picked or approved on this Mac before.
-    static func isTrusted(_ canonicalPath: String) -> Bool {
-        stored.contains(canonicalPath)
+    /// True when `path` was picked or approved on this Mac before.
+    static func isTrusted(_ path: String) -> Bool {
+        stored.contains(normalizedPath(path))
     }
 
     /// Asks before using a picture from outside the edit file's folder.
@@ -38,7 +44,10 @@ enum BackgroundTrust {
         let alert = NSAlert()
         alert.messageText = "Use a background picture from another folder?"
         alert.informativeText = """
-            This edit file uses the picture “\(url.lastPathComponent)” from outside its own folder. \
+            This edit file uses the picture “\(url.lastPathComponent)” from outside its own folder:
+
+            \((url.path as NSString).abbreviatingWithTildeInPath)
+
             Use it only if you trust where this file came from, because the picture becomes \
             part of anything you export.
             """
@@ -48,14 +57,9 @@ enum BackgroundTrust {
         return alert.runModal() == .alertSecondButtonReturn
     }
 
-    /// The same canonical form the core produces: symlinks and `..` resolved by `realpath`.
-    ///
-    /// `URL.resolvingSymlinksInPath` is not used: it rewrites `/private/var` to
-    /// `/var`, which would never match the core's paths.
-    static func canonicalPath(_ path: String) -> String? {
-        guard let resolved = realpath(path, nil) else { return nil }
-        defer { free(resolved) }
-        return String(cString: resolved)
+    /// `.` and `..` resolved as text, without touching the disk.
+    static func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
     private static var stored: [String] {

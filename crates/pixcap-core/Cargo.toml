@@ -8,6 +8,9 @@ license.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 image = { version = "0.25", features = ["png", "webp", "jpeg"] }
+# Streaming GIF writer (ADR-0003). Already in the graph through `image`; used
+# directly because image's wrapper cannot report errors when finishing a file.
+gif = "0.14"
 regex = "1.10"
 thiserror = "2.0"
 syntect = "5.2"
