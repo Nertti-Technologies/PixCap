@@ -21,7 +21,12 @@ let package = Package(
                 .headerSearchPath("Bridge")
             ],
             linkerSettings: [
-                .unsafeFlags(["-L../../../target/debug", "-lpixcap_ffi"])
+                // Each configuration links its own Rust build. A single
+                // hard-coded target/debug path made release bundles embed
+                // the unoptimised debug core (about 3x larger and slower).
+                .unsafeFlags(["-L../../../target/debug"], .when(configuration: .debug)),
+                .unsafeFlags(["-L../../../target/release"], .when(configuration: .release)),
+                .linkedLibrary("pixcap_ffi")
             ]
         )
     ]
