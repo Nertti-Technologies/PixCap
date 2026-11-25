@@ -1,0 +1,5 @@
+Component: Solarized (dark) and Solarized (light) colour themes, compiled into syntect's
+built-in theme set (assets/default.themedump).
+Source: https://raw.githubusercontent.com/braver/Solarized/bcd6234b4f5f96d3fd27db079268b5757053072a/LICENSE
+(the submodule commit in syntect v5.3.0)
+Retrieved: 2026-11-25

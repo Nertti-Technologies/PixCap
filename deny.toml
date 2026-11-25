@@ -1,0 +1,36 @@
+# Licence policy for every Rust crate PixCap ships (§4 of the owner rules), checked by
+# `cargo deny check licenses` in the gate. Crediting is separate: scripts/notices.sh.
+#
+# Only permissive licences are allowed, and only those in use today, so a new kind of
+# licence is a reviewed change. Anything copyleft, share-alike, non-commercial
+# or unclear fails the check and needs the owner's decision before it can be added.
+
+[graph]
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+all-features = false
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "0BSD",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+# PixCap's own crates (publish = false) are Apache-2.0 per the root LICENSE.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

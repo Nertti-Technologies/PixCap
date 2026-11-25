@@ -29,6 +29,8 @@ mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/PixCap.app"
 # Drag-to-install target.
 ln -s /Applications "$STAGING/Applications"
+# Readable before installing, not only inside the app bundle.
+cp "$APP/Contents/Resources/THIRD-PARTY-NOTICES.txt" "$STAGING/Third-Party Notices.txt"
 
 # Volume icon, so the mounted disk uses the app mark rather than a blank drive.
 if [ -f "$PACKAGE_DIR/Resources/AppIcon.icns" ]; then

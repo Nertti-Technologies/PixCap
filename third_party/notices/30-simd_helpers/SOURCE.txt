@@ -1,0 +1,6 @@
+Component: simd_helpers 0.1.0 (Rust crate, MIT)
+Why here: the published crate ships without a licence file.
+Source: https://raw.githubusercontent.com/lu-zero/simd_helpers/master/LICENSE
+(the commit recorded in the crate, ca1a2f84aa386d758e98f8a609d990263932fb85, is not in the public
+repository; master was 5ef414be0dc782df1de66beed71f8db25742cb8e when retrieved)
+Retrieved: 2026-11-25

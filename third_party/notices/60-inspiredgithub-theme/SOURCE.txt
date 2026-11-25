@@ -1,0 +1,5 @@
+Component: InspiredGitHub colour theme, compiled into syntect's built-in theme set
+(assets/default.themedump).
+Source: https://raw.githubusercontent.com/sethlopezme/InspiredGitHub.tmtheme/18ddb271179e118cfc2dd83abf88b915b7328a25/LICENSE
+(the submodule commit in syntect v5.3.0)
+Retrieved: 2026-11-25

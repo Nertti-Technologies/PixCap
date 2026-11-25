@@ -1,0 +1,21 @@
+# Input for cargo-about, which generates THIRD-PARTY-NOTICES.txt. Do not edit the output;
+# regenerate it with scripts/notices.sh, which the gate runs in check mode.
+#
+# Order matters: for a choice such as "MIT OR Apache-2.0", the first accepted licence is used.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "0BSD",
+    "CC0-1.0",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+# Credit what ships in the macOS (Apple silicon) and Windows builds. PixCap's own
+# crates are not third-party.
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+private = { ignore = true }

@@ -1,6 +1,8 @@
 [package]
 name = "pixcap-ipc"
 version.workspace = true
+# PixCap's own crates are not published; this also keeps them out of the third-party notices.
+publish = false
 edition.workspace = true
 license.workspace = true
 

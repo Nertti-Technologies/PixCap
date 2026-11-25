@@ -1,0 +1,6 @@
+Component: base16-ocean.dark, base16-ocean.light, base16-eighties.dark and base16-mocha.dark
+colour themes, from the Spacegray package, compiled into syntect's built-in theme set
+(assets/default.themedump).
+Source: https://raw.githubusercontent.com/kkga/spacegray/2703e93f559e212ef3895edd10d861a4383ce93d/LICENSE
+(the submodule commit in syntect v5.3.0)
+Retrieved: 2026-11-25

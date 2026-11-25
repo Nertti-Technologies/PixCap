@@ -1,0 +1,5 @@
+Component: zune-inflate 0.2.54 (Rust crate, MIT OR Apache-2.0 OR Zlib)
+Why here: the published crate ships without a licence file and names no repository.
+Source: https://github.com/etemesi254/zune-image at 69502ce83fdfecdd0beefd677e2abb3781b29d98
+(the commit recorded in the crate's .cargo_vcs_info.json): LICENSE.md and LICENSE-ZLIB
+Retrieved: 2026-11-25

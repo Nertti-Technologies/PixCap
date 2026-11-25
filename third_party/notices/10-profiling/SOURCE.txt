@@ -1,0 +1,5 @@
+Component: profiling 1.0.18 and profiling-procmacros 1.0.18 (Rust crates, MIT OR Apache-2.0; MIT used)
+Why here: the published crates ship without a licence file.
+Source: https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT
+(the commit recorded in the crate's .cargo_vcs_info.json)
+Retrieved: 2026-11-25

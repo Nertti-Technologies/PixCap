@@ -1,0 +1,7 @@
+Component: syntax definitions from Sublime Text's default packages, compiled into the
+syntect crate's built-in syntax set (assets/default_newlines.packdump), which PixCap loads
+for code highlighting.
+Source: https://github.com/sublimehq/Packages at fa6b8629c95041bf262d4c1dab95c456a0530122
+(the submodule commit in syntect v5.3.0): LICENSE, Rust/LICENSE.txt, and the licence
+header of YAML/YAML.sublime-syntax. No other syntax file at that commit carries its own terms.
+Retrieved: 2026-11-25
