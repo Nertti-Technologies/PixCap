@@ -92,7 +92,7 @@ public final class BatchCaptureSession: ObservableObject {
                     try data.write(to: url)
                     written += 1
                 } catch {
-                    NSLog("PixCap: batch export failed for \(url.lastPathComponent): \(error.localizedDescription)")
+                    NSLog("PixCap: batch export failed (%@ %ld)", (error as NSError).domain, (error as NSError).code)
                 }
             }
         }

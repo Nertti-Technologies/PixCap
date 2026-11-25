@@ -129,6 +129,9 @@ pub fn find_alignment(canvas: &GrayImage, next: &GrayImage, options: &StitchOpti
 ///
 /// Frames that add no new content (the view did not scroll) are skipped, and a
 /// frame whose overlap cannot be located is appended whole rather than dropped.
+///
+/// The result stops growing at `render::MAX_IMAGE_SIDE` rows: anything taller
+/// could not be opened again for editing, so later frames are ignored.
 pub fn stitch_vertical(
     frames: &[DynamicImage],
     options: &StitchOptions,
@@ -164,9 +167,11 @@ pub fn stitch_vertical(
             (canvas.height(), 0)
         };
 
-        let new_rows = frame_gray.height().saturating_sub(start_row);
+        // Compare before adding, so the height cap cannot be overflowed.
+        let room = crate::render::MAX_IMAGE_SIDE.saturating_sub(keep_rows);
+        let new_rows = frame_gray.height().saturating_sub(start_row).min(room);
         if new_rows == 0 {
-            continue; // view did not scroll
+            continue; // view did not scroll, or the image is already as tall as allowed
         }
 
         let mut combined = RgbaImage::new(width, keep_rows + new_rows);
@@ -204,7 +209,10 @@ pub fn stitch_files(paths: &[String], output_path: &str) -> Result<(u32, u32), S
     }
 
     let stitched = stitch_vertical(&frames, &StitchOptions::default())?;
-    stitched.save(output_path)?;
+    let format = image::ImageFormat::from_path(output_path)?;
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    stitched.write_to(&mut encoded, format)?;
+    crate::fsutil::write_atomic(output_path, encoded.get_ref()).map_err(image::ImageError::IoError)?;
     Ok((stitched.width(), stitched.height()))
 }
 

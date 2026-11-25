@@ -37,7 +37,7 @@ public enum ImageExporter {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
-            NSLog("PixCap: could not create save directory \(directory.path): \(error.localizedDescription)")
+            NSLog("PixCap: could not create the save directory (%@ %ld)", (error as NSError).domain, (error as NSError).code)
             return nil
         }
 
@@ -63,7 +63,7 @@ public enum ImageExporter {
             try data.write(to: url)
             return url
         } catch {
-            NSLog("PixCap: failed to write \(url.path): \(error.localizedDescription)")
+            NSLog("PixCap: could not write a capture (%@ %ld)", (error as NSError).domain, (error as NSError).code)
             return nil
         }
     }

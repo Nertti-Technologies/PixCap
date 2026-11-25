@@ -168,6 +168,9 @@ pub fn parse_color(hex: &str) -> Option<Color> {
 /// large display, a long scrolling capture, or a re-beautified export can
 /// legitimately exceed. The ceiling here is generous but still bounded, so a
 /// malformed file cannot exhaust memory.
+///
+/// Shares `MAX_IMAGE_SIDE` with the stitcher and the document limits, so
+/// nothing PixCap writes is too large for it to open again.
 pub fn open_image(path: &str) -> Result<DynamicImage, RenderError> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|error| RenderError::Image(image::ImageError::IoError(error)))?
@@ -175,9 +178,8 @@ pub fn open_image(path: &str) -> Result<DynamicImage, RenderError> {
         .map_err(|error| RenderError::Image(image::ImageError::IoError(error)))?;
 
     let mut limits = image::Limits::default();
-    // 32768 covers an 8K display captured at 2x, and then some.
-    limits.max_image_width = Some(32_768);
-    limits.max_image_height = Some(32_768);
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
     limits.max_alloc = Some(4 * 1024 * 1024 * 1024);
     reader.limits(limits);
 
@@ -202,6 +204,18 @@ pub fn render_document(
 }
 
 /// Renders a document into a pixmap, for callers that want the raw pixels.
+/// Largest width or height of an image PixCap opens, stitches or renders.
+/// 32768 covers an 8K display (7680 px) captured at 2x, and then some.
+pub const MAX_IMAGE_SIDE: u32 = 32_768;
+
+/// Largest canvas, in pixels, a render may allocate: 1 GiB of RGBA (2^28 px x 4 bytes).
+///
+/// An estimate chosen so one render stays well inside a laptop's memory; the
+/// largest realistic export (an 8K capture at 2x with maximum padding) is
+/// about 2.3e8 px. It also keeps every `(row * width + x) * 4` pixel index
+/// below `i32::MAX` (2^30 < 2^31), which the blur and grain loops rely on.
+pub const MAX_CANVAS_PIXELS: u64 = 1 << 28;
+
 pub fn render_to_pixmap(
     source: &DynamicImage,
     document: &AnnotationDocument,
@@ -219,6 +233,19 @@ pub fn render_to_pixmap(
 
     let pixel_width = (layout.canvas_width * scale).round() as u32;
     let pixel_height = (layout.canvas_height * scale).round() as u32;
+
+    // Refuse before allocating: a failed allocation aborts the process and
+    // cannot be caught. `as u32` saturates, so huge or infinite values land here too.
+    let too_large = !scale.is_finite()
+        || pixel_width > MAX_IMAGE_SIDE
+        || pixel_height > MAX_IMAGE_SIDE
+        || u64::from(pixel_width) * u64::from(pixel_height) > MAX_CANVAS_PIXELS;
+    if too_large {
+        return Err(RenderError::BadCanvas {
+            width: pixel_width,
+            height: pixel_height,
+        });
+    }
 
     let mut pixmap = Pixmap::new(pixel_width, pixel_height).ok_or(RenderError::BadCanvas {
         width: pixel_width,
@@ -1156,6 +1183,17 @@ mod tests {
             *pixel = Rgba([(x % 255) as u8, (y % 255) as u8, 128, 255]);
         }
         DynamicImage::ImageRgba8(image)
+    }
+
+    #[test]
+    fn refuses_a_canvas_over_the_budget_instead_of_allocating() {
+        let document = AnnotationDocument::default();
+        for scale in [1.0e6_f32, f32::INFINITY, f32::NAN] {
+            assert!(
+                matches!(render_to_pixmap(&source(64, 64), &document, scale), Err(RenderError::BadCanvas { .. })),
+                "scale {scale} should be refused"
+            );
+        }
     }
 
     fn document() -> AnnotationDocument {

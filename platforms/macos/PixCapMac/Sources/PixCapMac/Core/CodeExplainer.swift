@@ -10,9 +10,24 @@ import Foundation
 public enum CodeExplainer {
 
     /// Default Ollama endpoint. Configurable for a non-standard port.
-    public static var endpoint: URL {
-        let raw = Settings.string(SettingsKey.ollamaEndpoint, default: "http://localhost:11434")
-        return URL(string: raw) ?? URL(string: "http://localhost:11434")!
+    private static let defaultEndpointString = "http://localhost:11434"
+
+    /// The configured endpoint, accepted only when it is on this machine.
+    ///
+    /// The setting is a free-form string (writable with `defaults write`), and
+    /// the request carries the user's code over plain HTTP. Anything but a
+    /// loopback host falls back to the default, so the "local-only" promise
+    /// above holds whatever the setting says.
+    public static var endpoint: URL? {
+        let raw = Settings.string(SettingsKey.ollamaEndpoint, default: defaultEndpointString)
+        if let url = URL(string: raw), isLoopback(url) { return url }
+        return URL(string: defaultEndpointString)
+    }
+
+    static func isLoopback(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host?.lowercased() else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
     }
 
     public static var model: String {
@@ -52,6 +67,7 @@ public enum CodeExplainer {
 
     /// Models Ollama currently has, or nil when it is not reachable.
     public static func installedModels() async -> [String]? {
+        guard let endpoint else { return nil }
         var request = URLRequest(url: endpoint.appendingPathComponent("api/tags"))
         request.timeoutInterval = 2
 
@@ -112,6 +128,7 @@ public enum CodeExplainer {
             ```
             """
 
+        guard let endpoint else { throw ExplainError.unavailable }
         var request = URLRequest(url: endpoint.appendingPathComponent("api/generate"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

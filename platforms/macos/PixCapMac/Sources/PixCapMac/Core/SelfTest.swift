@@ -150,6 +150,11 @@ public enum SelfTest {
         }
         check("region overlay covers every display (\(NSScreen.screens.count) found)", misplaced.isEmpty)
 
+        // The code explainer must never send code off this machine.
+        check("explainer accepts a loopback endpoint", CodeExplainer.isLoopback(URL(string: "http://127.0.0.1:11434")!))
+        check("explainer rejects a remote endpoint", !CodeExplainer.isLoopback(URL(string: "http://example.com:11434")!))
+        check("explainer rejects a look-alike host", !CodeExplainer.isLoopback(URL(string: "http://localhost.example.com")!))
+
         check("hex parses to colour", NSColor(hex: "#FF3366") != nil)
         check("colour round-trips to hex", NSColor(hex: "#FF3366")?.hexString == "#FF3366")
         check("malformed hex rejected", NSColor(hex: "#ZZZ") == nil)

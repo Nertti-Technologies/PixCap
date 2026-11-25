@@ -225,6 +225,7 @@ impl AnnotationDocument {
             return Err(DocumentError::UnsupportedVersion(document.version));
         }
 
+        document.clamp_to_editor_ranges();
         Ok(document)
     }
 
@@ -237,12 +238,69 @@ impl AnnotationDocument {
         if let Some(parent) = Path::new(path).parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, self.to_json()?)?;
+        crate::fsutil::write_atomic(path, self.to_json()?.as_bytes())?;
         Ok(())
     }
 
     pub fn read(path: &str) -> Result<Self, DocumentError> {
         Self::from_json(&fs::read_to_string(path)?)
+    }
+
+    /// Pulls every number into the range the editors can produce.
+    ///
+    /// A sidecar is a file anyone can hand the user (for example inside a
+    /// zip), and these values size buffers and drive loops in both renderers:
+    /// `padding: 1e6` asked for a canvas of about 16 TB and aborted the app.
+    /// Ranges are the editor slider limits (macOS `EditorWindowView.swift` /
+    /// `AnnotationToolsView.swift`, Windows `MainWindow.xaml`), taking the wider
+    /// of the two where they differ, so no document either app saved changes.
+    /// Non-finite values fall back to the field's default.
+    fn clamp_to_editor_ranges(&mut self) {
+        let defaults = CanvasRecord::default();
+        let c = &mut self.canvas;
+        c.padding = bounded(c.padding, 0.0, 160.0, defaults.padding);
+        c.corner_radius = bounded(c.corner_radius, 0.0, 48.0, defaults.corner_radius);
+        c.shadow_blur = bounded(c.shadow_blur, 0.0, 80.0, defaults.shadow_blur);
+        c.shadow_opacity = bounded(c.shadow_opacity, 0.0, 1.0, defaults.shadow_opacity);
+        c.background_blur = bounded(c.background_blur, 0.0, 40.0, 0.0);
+        c.noise_intensity = bounded(c.noise_intensity, 0.0, 1.0, 0.0);
+        c.tilt_x = bounded(c.tilt_x, -45.0, 45.0, 0.0);
+        c.tilt_y = bounded(c.tilt_y, -45.0, 45.0, 0.0);
+        if let Some([x, y, w, h]) = c.crop {
+            // A crop lies inside a source image, which `render::open_image` caps per side.
+            let max = crate::render::MAX_IMAGE_SIDE as f64;
+            let valid = [x, y, w, h].iter().all(|v| v.is_finite() && (0.0..=max).contains(v));
+            if !valid {
+                c.crop = None;
+            }
+        }
+
+        for item in &mut self.items {
+            // Slider maximums: stroke 16 (Windows), text 72 pt, blur 60.
+            item.stroke_width = bounded(item.stroke_width, 0.0, 16.0, default_stroke_width());
+            item.font_size = bounded(item.font_size, 1.0, 72.0, default_font_size());
+            item.blur_intensity = bounded(item.blur_intensity, 0.0, 60.0, default_blur_intensity());
+            item.spotlight_dim = bounded(item.spotlight_dim, 0.0, 1.0, default_spotlight_dim());
+            // Annotations may sit outside the image, but never beyond the largest canvas.
+            let limit = crate::render::MAX_IMAGE_SIDE as f64;
+            for point in std::iter::once(&mut item.start)
+                .chain(std::iter::once(&mut item.end))
+                .chain(item.points.iter_mut())
+            {
+                for value in point.iter_mut() {
+                    *value = bounded(*value, -limit, limit, 0.0);
+                }
+            }
+        }
+    }
+}
+
+/// `value` clamped to `min..=max`, or `fallback` when it is NaN or infinite.
+fn bounded(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
     }
 }
 
@@ -262,6 +320,34 @@ pub fn sidecar_path(image_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_numbers_are_pulled_into_editor_ranges() {
+        let json = r#"{
+            "canvas": { "padding": 1e300, "shadow_blur": -5, "noise_intensity": 9,
+                        "tilt_x": 1000, "crop": [0, 0, 1e12, 10] },
+            "items": [{ "tool": "text", "font_size": 1e9, "stroke_width": 1e6,
+                        "start": [1e300, -1e300], "points": [[1e20, 3]] }]
+        }"#;
+        let document = AnnotationDocument::from_json(json).unwrap();
+        assert_eq!(document.canvas.padding, 160.0);
+        assert_eq!(document.canvas.shadow_blur, 0.0);
+        assert_eq!(document.canvas.noise_intensity, 1.0);
+        assert_eq!(document.canvas.tilt_x, 45.0);
+        assert!(document.canvas.crop.is_none());
+        let item = &document.items[0];
+        assert_eq!(item.font_size, 72.0);
+        assert_eq!(item.stroke_width, 16.0);
+        assert_eq!(item.start, [32_768.0, -32_768.0]);
+        assert_eq!(item.points[0], [32_768.0, 3.0]);
+    }
+
+    #[test]
+    fn non_finite_numbers_fall_back_to_defaults() {
+        assert_eq!(bounded(f64::NAN, 0.0, 10.0, 4.0), 4.0);
+        assert_eq!(bounded(f64::INFINITY, 0.0, 10.0, 4.0), 4.0);
+        assert_eq!(bounded(5.0, 0.0, 10.0, 4.0), 5.0);
+    }
 
     fn sample() -> AnnotationDocument {
         AnnotationDocument {

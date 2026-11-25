@@ -86,7 +86,7 @@ public enum DocumentStore {
 
         let target = sidecarURL(forImage: sourceImageURL)
         guard PixCapBridge.shared.writeDocument(json: json, to: target.path) else {
-            NSLog("PixCap: the core rejected the document for \(sourceImageURL.lastPathComponent)")
+            NSLog("PixCap: the core rejected an edit document")
             return nil
         }
         return target

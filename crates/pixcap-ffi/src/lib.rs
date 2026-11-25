@@ -417,15 +417,23 @@ pub unsafe extern "C" fn pixcap_render_document(
             return -1;
         };
 
+        // Callers pass 1x-3x; 8x is an estimate of the most any export needs.
+        // NaN fails the range check too.
+        if !(0.1..=8.0).contains(&scale) {
+            eprintln!("pixcap: render scale out of range");
+            return -1;
+        }
+
+        // Paths are not logged: they hold the account name and window titles.
         let source = match pixcap_core::render::open_image(source_path) {
             Ok(image) => image,
             Err(error) => {
-                eprintln!("pixcap: could not open {source_path}: {error}");
+                eprintln!("pixcap: could not open the source image: {error}");
                 return -1;
             }
         };
 
-        let png = match pixcap_core::render_document(&source, &document, scale.max(0.1)) {
+        let png = match pixcap_core::render_document(&source, &document, scale) {
             Ok(bytes) => bytes,
             Err(error) => {
                 eprintln!("pixcap: render failed: {error}");
@@ -433,10 +441,10 @@ pub unsafe extern "C" fn pixcap_render_document(
             }
         };
 
-        match std::fs::write(destination, png) {
+        match pixcap_core::write_atomic(destination, &png) {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("pixcap: could not write {destination}: {error}");
+                eprintln!("pixcap: could not write the output image: {}", error.kind());
                 -1
             }
         }

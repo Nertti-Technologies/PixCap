@@ -2,6 +2,7 @@ pub mod annotations;
 pub mod canvas;
 pub mod document;
 pub mod export;
+pub mod fsutil;
 pub mod history;
 pub mod naming;
 pub mod redaction;
@@ -15,6 +16,7 @@ pub use document::{AnnotationDocument, AnnotationRecord, CanvasRecord, DocumentE
 pub use render::{layout as render_layout, render_document, render_to_pixmap, Layout, RenderError};
 pub use stitch::{stitch_files, stitch_vertical, StitchError, StitchOptions};
 pub use canvas::{CanvasLayout, ContainerSizing, DropShadowConfig, PaddingConfig, WindowFrameStyle};
+pub use fsutil::write_atomic;
 pub use export::{CodeRenderer, ExportError, RenderOptions};
 pub use history::{HistoryDb, ScreenshotRecord};
 pub use naming::{default_pattern, resolve_filename, CaptureContext};

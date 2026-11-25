@@ -37,6 +37,26 @@ pub struct CodeRenderer {
     highlighter: SyntaxHighlighter,
 }
 
+/// Escapes text for an XML text node or a double- or single-quoted attribute.
+///
+/// Colour values reach the SVG from IPC requests and documents, so they are
+/// escaped like code text: an unescaped `"/><script>` in a colour would
+/// otherwise become live markup wherever the SVG is shown.
+fn xml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 impl Default for CodeRenderer {
     fn default() -> Self {
         Self {
@@ -60,7 +80,7 @@ impl CodeRenderer {
         // Calculate dimensions
         let max_line_len = lines
             .iter()
-            .map(|l| l.tokens.iter().map(|(t, _)| t.len()).sum::<usize>())
+            .map(|l| l.tokens.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
             .max()
             .unwrap_or(40);
 
@@ -85,7 +105,7 @@ impl CodeRenderer {
             BackgroundFill::Gradient { angle_deg: _, stops } => {
                 svg.push_str("<defs><linearGradient id=\"bg-grad\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">");
                 for (pos, hex) in stops {
-                    svg.push_str(&format!(r#"<stop offset="{:.0}%" stop-color="{}" />"#, pos * 100.0, hex));
+                    svg.push_str(&format!(r#"<stop offset="{:.0}%" stop-color="{}" />"#, pos * 100.0, xml_escape(hex)));
                 }
                 svg.push_str("</linearGradient></defs>");
                 svg.push_str(&format!(
@@ -96,7 +116,7 @@ impl CodeRenderer {
             BackgroundFill::Solid(hex) => {
                 svg.push_str(&format!(
                     r#"<rect width="{}" height="{}" fill="{}" rx="16" />"#,
-                    canvas_width, canvas_height, hex
+                    canvas_width, canvas_height, xml_escape(hex)
                 ));
             }
             BackgroundFill::Transparent => {
@@ -121,7 +141,7 @@ impl CodeRenderer {
                 options.layout.drop_shadow.y_offset,
                 options.layout.drop_shadow.blur_radius,
                 options.layout.drop_shadow.opacity,
-                options.layout.drop_shadow.color_hex
+                xml_escape(&options.layout.drop_shadow.color_hex)
             ));
         }
 
@@ -160,11 +180,7 @@ impl CodeRenderer {
             let mut current_x = code_start_x;
             for (text, style) in &line.tokens {
                 let color_hex = format!("#{:02x}{:02x}{:02x}", style.foreground.r, style.foreground.g, style.foreground.b);
-                let escaped_text = text
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;")
-                    .replace('"', "&quot;");
+                let escaped_text = xml_escape(text);
 
                 // xml:space="preserve" is required. Each token is its own
                 // <text>, and the default XML handling strips leading and
@@ -189,6 +205,21 @@ impl CodeRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colour_values_cannot_break_out_of_attributes() {
+        let mut options = RenderOptions::default();
+        options.code = "let x = 1;".to_string();
+        options.language = "rust".to_string();
+        options.background = BackgroundFill::Solid("\"/><script>alert(1)</script>".to_string());
+        options.layout.drop_shadow.enabled = true;
+        options.layout.drop_shadow.color_hex = "'><x".to_string();
+
+        let svg = CodeRenderer::default().render_svg(&options).unwrap();
+        assert!(!svg.contains("<script"), "{svg}");
+        assert!(!svg.contains("'><x"), "{svg}");
+        assert!(svg.contains("&quot;/&gt;&lt;script&gt;"));
+    }
 
     #[test]
     fn test_render_svg_generation() {
