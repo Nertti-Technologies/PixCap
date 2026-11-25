@@ -1,5 +1,6 @@
 Component: Windows SDK projection for .NET 10.0.22621.57 (runtime pack Microsoft.Windows.SDK.NET.Ref):
-Microsoft.Windows.SDK.NET.dll and WinRT.Runtime.dll installed with PixCap for Windows.
+Microsoft.Windows.SDK.NET.dll and WinRT.Runtime.dll installed with PixCap for Windows
+(WinRT.Runtime.dll is also under MIT upstream; see 40-cswinrt).
 Licence: Microsoft Software License Terms, Microsoft Windows Software Development Kit (SDK) for
 Windows 10 (proprietary; distributable code).
 Source: the package names https://aka.ms/WinSDKLicenseURL, which resolved to

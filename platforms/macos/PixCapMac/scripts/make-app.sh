@@ -62,8 +62,12 @@ if [ ! -f "$ICON" ]; then
 fi
 cp "$ICON" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
-# Licence and third-party notices ship inside the app (§4). Regenerate the notices
-# with scripts/notices.sh; the gate fails if the committed file is stale.
+# Licence and third-party notices ship inside the app (§4). A release build refuses
+# to package a notices file that no longer matches the dependencies; regenerate it
+# with scripts/notices.sh. scripts/gate.sh runs the same check.
+if [ "$CONFIG" = "release" ]; then
+    "$REPO_ROOT/scripts/notices.sh" --check
+fi
 cp "$REPO_ROOT/LICENSE" "$APP_DIR/Contents/Resources/LICENSE.txt"
 cp "$REPO_ROOT/THIRD-PARTY-NOTICES.txt" "$APP_DIR/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 

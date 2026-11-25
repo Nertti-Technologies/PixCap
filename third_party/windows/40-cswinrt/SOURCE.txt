@@ -1,0 +1,6 @@
+Component: C#/WinRT runtime 2.2.0 (WinRT.Runtime.dll, built from microsoft/CsWinRT commit
+8649ee3eeb2445ca2a36d80d878ef60b96a6c65d per its ProductVersion), installed with PixCap for Windows.
+It reaches the app through the Windows SDK projection pack (see 30-windows-sdk-projection);
+its upstream licence is MIT, reproduced here as well.
+Source: https://raw.githubusercontent.com/microsoft/CsWinRT/8649ee3eeb2445ca2a36d80d878ef60b96a6c65d/LICENSE
+Retrieved: 2026-11-25

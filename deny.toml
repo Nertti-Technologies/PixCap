@@ -1,5 +1,5 @@
 # Licence policy for every Rust crate PixCap ships (§4 of the owner rules), checked by
-# `cargo deny check licenses` in the gate. Crediting is separate: scripts/notices.sh.
+# `cargo deny check licenses` in scripts/gate.sh. Crediting is separate: scripts/notices.sh.
 #
 # Only permissive licences are allowed, and only those in use today, so a new kind of
 # licence is a reviewed change. Anything copyleft, share-alike, non-commercial

@@ -94,11 +94,15 @@ final class StreamingGIFWriter {
     /// Writes the held frame, waits for queued frames, then completes the
     /// file (`keep`) or deletes it. True only when a complete GIF is at the
     /// URL. Later calls return false.
-    func finish(keep: Bool) -> Bool {
+    ///
+    /// `end` is when the recording stopped, on the frames' clock; the last
+    /// frame shows until then (at least one frame interval).
+    func finish(keep: Bool, endingAt end: Double? = nil) -> Bool {
         lock.lock()
         var last: (rgba: Data, delay: UInt32)?
         if keep, let frame = held, let origin {
-            last = (frame.rgba, delayUntil(frame.time - origin + frameDelay))
+            let shownUntil = max(end ?? 0, frame.time + frameDelay)
+            last = (frame.rgba, delayUntil(shownUntil - origin))
             pending += 1
         }
         held = nil
@@ -118,7 +122,9 @@ final class StreamingGIFWriter {
         // GIF delays are whole centiseconds, 1...65535.
         let target = Int((max(0, elapsed) * 100).rounded())
         let delay = UInt32(min(65_535, max(1, target - emittedCentiseconds)))
-        emittedCentiseconds += Int(delay)
+        // When the cap cuts a very long still stretch (over 655 s), drop the
+        // excess rather than carry it onto the next frame.
+        emittedCentiseconds = max(emittedCentiseconds + Int(delay), target)
         return delay
     }
 

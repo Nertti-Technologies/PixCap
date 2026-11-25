@@ -85,10 +85,15 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     private var elapsedTimer: Timer?
 
     // Pause bookkeeping: paused time is subtracted from presentation stamps so
-    // the output has no gap.
+    // the output has no gap. Pause and resume are read from the host clock,
+    // which ScreenCaptureKit stamps frames with. The last frame's stamp is no
+    // good: on a still screen no new frames arrive, so a long pause measured
+    // that way came out near zero and froze the GIF for the whole pause.
+    // Read and written on `queue`.
     private var pausedAt: CMTime?
     private var pausedOffset: CMTime = .zero
-    private var lastPresentationTime: CMTime = .zero
+
+    private static var hostNow: CMTime { CMClockGetTime(CMClockGetHostTimeClock()) }
 
     // GIF streaming. `gifWriter` is set before the stream starts and cleared
     // after it stops, so the sample queue never races its assignment.
@@ -231,6 +236,10 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         self.stream = stream
 
         await MainActor.run {
+            // A stream error after the check above may already have finished
+            // this recording (and cleared `isRecording`); showing it as running
+            // then would leave the UI stuck in "recording" until relaunch.
+            guard queue.sync(execute: { phase == .active && recordingID == id }) else { return }
             self.isRecording = true
             self.isPaused = false
             self.elapsed = 0
@@ -309,11 +318,11 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         queue.sync {
             if isPaused {
                 if let pausedAt {
-                    pausedOffset = CMTimeAdd(pausedOffset, CMTimeSubtract(lastPresentationTime, pausedAt))
+                    pausedOffset = CMTimeAdd(pausedOffset, CMTimeSubtract(Self.hostNow, pausedAt))
                 }
                 pausedAt = nil
             } else {
-                pausedAt = lastPresentationTime
+                pausedAt = Self.hostNow
             }
         }
         isPaused.toggle()
@@ -396,8 +405,11 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     private func finishGIF() -> URL? {
         guard let gifWriter else { return nil }
         self.gifWriter = nil
+        // The recording ends now (or when it was paused), on the frames' clock,
+        // so a still stretch before Stop keeps its length.
+        let end = queue.sync { CMTimeGetSeconds(CMTimeSubtract(pausedAt ?? Self.hostNow, pausedOffset)) }
         // Waits for at most `maxBacklog` queued frames, then writes the trailer.
-        let written = gifWriter.finish(keep: true)
+        let written = gifWriter.finish(keep: true, endingAt: end)
         let dropped = gifWriter.dropped
         if dropped > 0 { NSLog("PixCap: GIF encoder fell behind; %d frames dropped", dropped) }
         return written ? outputURL : nil
@@ -437,7 +449,6 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
             return
         }
 
-        lastPresentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard !isPaused else { return }
 
         switch format {

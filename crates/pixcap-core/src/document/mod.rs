@@ -394,7 +394,9 @@ pub fn relative_to_sidecar(sidecar: &str, target: &str) -> String {
 /// the system contact a remote host, telling its owner the file was opened).
 /// So the path is first normalised as text, and only a file directly beside
 /// the document is examined on disk. A sibling that is a symlink is not
-/// followed (it could point at a network share too) and counts as outside.
+/// followed (it could point at a network share too) and counts as outside;
+/// its target is read without being touched and returned instead, so the user
+/// is asked about, and trusts, the file that would really be read.
 /// Anything outside is returned untouched with `in_document_folder: false`,
 /// even if it does not exist, so the caller can ask before looking.
 pub fn resolve_from_sidecar(sidecar: &str, stored: &str) -> Option<ResolvedPath> {
@@ -421,7 +423,12 @@ pub fn resolve_from_sidecar(sidecar: &str, stored: &str) -> Option<ResolvedPath>
     }
     // lstat reads the entry in the document's own folder without following it.
     if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
-        return outside();
+        let target = fs::read_link(&path).ok()?;
+        let target = normalize_lexically(&folder.join(target))?;
+        return Some(ResolvedPath {
+            path: target.to_str()?.to_string(),
+            in_document_folder: false,
+        });
     }
 
     let real = fs::canonicalize(&path).ok()?;
@@ -558,7 +565,11 @@ mod tests {
 
         let via_link = resolve_from_sidecar(sidecar, "link.png").unwrap();
         assert!(!via_link.in_document_folder, "a symlink must not count as inside");
-        assert!(via_link.path.ends_with("captures/link.png"), "the link is not followed");
+        assert_eq!(
+            via_link.path,
+            outside.join("secret.png").to_str().unwrap(),
+            "the link's target is reported, so the prompt names the real file"
+        );
 
         let legacy = outside.join("secret.png");
         let absolute = resolve_from_sidecar(sidecar, legacy.to_str().unwrap()).unwrap();

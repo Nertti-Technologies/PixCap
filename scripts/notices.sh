@@ -5,7 +5,8 @@
 #   platforms/windows/installer/License.txt   the Windows installer's licence page
 #
 #   scripts/notices.sh           regenerate both
-#   scripts/notices.sh --check   fail if either committed file is out of date (part of the gate)
+#   scripts/notices.sh --check   fail if either committed file is out of date
+#                                (run by scripts/gate.sh and by make-app.sh for release builds)
 #
 # Part 1 comes from cargo-about (about.toml + about.hbs) and covers every Rust crate
 # compiled into the core for macOS and Windows. Part 2 appends third_party/notices/*:
@@ -20,6 +21,8 @@
 # The licence policy (which licences may be used at all) is checked separately by
 # `cargo deny check licenses` with deny.toml.
 set -eu
+# Fixed collation, so input files are listed in the same order on every machine.
+export LC_ALL=C
 
 cd "$(dirname "$0")/.."
 notices=THIRD-PARTY-NOTICES.txt

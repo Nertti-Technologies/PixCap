@@ -1,5 +1,5 @@
 # Input for cargo-about, which generates THIRD-PARTY-NOTICES.txt. Do not edit the output;
-# regenerate it with scripts/notices.sh, which the gate runs in check mode.
+# regenerate it with scripts/notices.sh (checked by scripts/gate.sh).
 #
 # Order matters: for a choice such as "MIT OR Apache-2.0", the first accepted licence is used.
 accepted = [
