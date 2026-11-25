@@ -174,7 +174,9 @@ public sealed class BeautifyOptions
         var document = new JsonObject
         {
             ["version"] = 1,
-            ["source_image"] = sourceImage,
+            // The edit file sits beside its image, so the file name is the
+            // relative path (ADR-0002); the full path would reveal the account name.
+            ["source_image"] = System.IO.Path.GetFileName(sourceImage),
             ["canvas"] = canvas,
             ["items"] = layer
         };

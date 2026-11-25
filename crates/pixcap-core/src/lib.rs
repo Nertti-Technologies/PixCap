@@ -12,7 +12,10 @@ pub mod syntax;
 pub mod themes;
 
 pub use annotations::{Annotation, AnnotationLayer, ArrowHeadStyle, BlurStyle};
-pub use document::{AnnotationDocument, AnnotationRecord, CanvasRecord, DocumentError, sidecar_path};
+pub use document::{
+    relative_to_sidecar, resolve_from_sidecar, sidecar_path, AnnotationDocument, AnnotationRecord,
+    CanvasRecord, DocumentError, ResolvedPath,
+};
 pub use render::{layout as render_layout, render_document, render_to_pixmap, Layout, RenderError};
 pub use stitch::{stitch_files, stitch_vertical, StitchError, StitchOptions};
 pub use canvas::{CanvasLayout, ContainerSizing, DropShadowConfig, PaddingConfig, WindowFrameStyle};

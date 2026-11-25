@@ -379,6 +379,54 @@ pub unsafe extern "C" fn pixcap_document_sidecar_path(image_path: *const c_char)
     })
 }
 
+/// The value to store in the edit document at `sidecar_path` for the file at
+/// `target_path`: relative to the document's folder where possible (ADR-0002).
+///
+/// The caller owns the returned string and must free it with `pixcap_free_string`.
+///
+/// # Safety
+/// Both arguments must be valid, null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn pixcap_document_relative_path(
+    sidecar_path: *const c_char,
+    target_path: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        match (opt_str(sidecar_path), opt_str(target_path)) {
+            (Some(sidecar), Some(target)) => {
+                into_c_string(pixcap_core::relative_to_sidecar(sidecar, target))
+            }
+            _ => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Resolves a stored path field of the edit document at `sidecar_path`.
+///
+/// Returns `{"path": "...", "in_document_folder": bool}` with a canonical
+/// path, or null when the value is empty or the file does not exist. The
+/// caller owns the returned string and must free it with `pixcap_free_string`.
+///
+/// # Safety
+/// Both arguments must be valid, null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn pixcap_document_resolve_path(
+    sidecar_path: *const c_char,
+    stored: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let (Some(sidecar), Some(stored)) = (opt_str(sidecar_path), opt_str(stored)) else {
+            return std::ptr::null_mut();
+        };
+        match pixcap_core::resolve_from_sidecar(sidecar, stored)
+            .and_then(|resolved| serde_json::to_string(&resolved).ok())
+        {
+            Some(json) => into_c_string(json),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Beautification rendering
 // ---------------------------------------------------------------------------

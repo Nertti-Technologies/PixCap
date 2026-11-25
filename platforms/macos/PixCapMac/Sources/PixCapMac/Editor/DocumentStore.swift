@@ -72,10 +72,13 @@ public enum DocumentStore {
         config: BeautifyConfig,
         items: [AnnotationItem]
     ) -> URL? {
+        // Paths are stored relative to the edit file, so a shared file does
+        // not reveal the account name or folder layout (ADR-0002).
+        let target = sidecarURL(forImage: sourceImageURL)
         let document = DocumentDTO(
             version: 1,
-            source_image: sourceImageURL.path,
-            canvas: encode(config),
+            source_image: PixCapBridge.shared.documentRelativePath(sidecar: target.path, target: sourceImageURL.path),
+            canvas: encode(config, sidecar: target),
             items: items.map(encode)
         )
 
@@ -84,7 +87,6 @@ public enum DocumentStore {
             return nil
         }
 
-        let target = sidecarURL(forImage: sourceImageURL)
         guard PixCapBridge.shared.writeDocument(json: json, to: target.path) else {
             NSLog("PixCap: the core rejected an edit document")
             return nil
@@ -92,21 +94,29 @@ public enum DocumentStore {
         return target
     }
 
+    /// Asked before using a background picture from outside the edit file's
+    /// folder that this Mac has not approved; true means use it.
+    public typealias BackgroundConfirmation = (URL) -> Bool
+
     /// Loads a sidecar, if one exists for `imageURL`.
+    @MainActor
     public static func load(forImage imageURL: URL) -> LoadedDocument? {
-        load(sidecar: sidecarURL(forImage: imageURL))
+        load(sidecar: sidecarURL(forImage: imageURL), confirmBackground: BackgroundTrust.askUser)
     }
 
-    public static func load(sidecar url: URL) -> LoadedDocument? {
+    public static func load(sidecar url: URL, confirmBackground: BackgroundConfirmation) -> LoadedDocument? {
         guard let json = PixCapBridge.shared.readDocument(at: url.path),
               let data = json.data(using: .utf8),
               let document = try? JSONDecoder().decode(DocumentDTO.self, from: data) else {
             return nil
         }
 
+        // Relative values (ADR-0002) are taken from the edit file's folder;
+        // absolute ones from older builds are used as they are.
+        let folder = url.deletingLastPathComponent()
         return LoadedDocument(
-            sourceImageURL: URL(fileURLWithPath: document.source_image),
-            config: decode(document.canvas),
+            sourceImageURL: URL(fileURLWithPath: document.source_image, relativeTo: folder).absoluteURL,
+            config: decode(document.canvas, sidecar: url, confirmBackground: confirmBackground),
             items: document.items.map(decode)
         )
     }
@@ -117,7 +127,7 @@ public enum DocumentStore {
 
     // MARK: - Encoding
 
-    private static func encode(_ config: BeautifyConfig) -> CanvasRecordDTO {
+    private static func encode(_ config: BeautifyConfig, sidecar: URL) -> CanvasRecordDTO {
         let kind: String
         let value: String
 
@@ -130,7 +140,7 @@ public enum DocumentStore {
             value = ""
         case .customImage(let url):
             kind = "image"
-            value = url.path
+            value = PixCapBridge.shared.documentRelativePath(sidecar: sidecar.path, target: url.path)
         }
 
         return CanvasRecordDTO(
@@ -172,15 +182,23 @@ public enum DocumentStore {
 
     // MARK: - Decoding
 
-    private static func decode(_ record: CanvasRecordDTO) -> BeautifyConfig {
+    /// Preset used when a document names none, or its picture cannot be used.
+    private static let defaultPresetID = "azure-mesh"
+
+    private static func decode(
+        _ record: CanvasRecordDTO,
+        sidecar: URL,
+        confirmBackground: BackgroundConfirmation
+    ) -> BeautifyConfig {
         let background: BackgroundSelection
         switch record.background_kind {
         case "wallpaper":
             background = .desktopWallpaper
         case "image":
-            background = .customImage(url: URL(fileURLWithPath: record.background_value))
+            background = usableBackground(record.background_value, sidecar: sidecar, confirm: confirmBackground)
+                .map { .customImage(url: $0) } ?? .preset(id: defaultPresetID)
         default:
-            background = .preset(id: record.background_value.isEmpty ? "azure-mesh" : record.background_value)
+            background = .preset(id: record.background_value.isEmpty ? defaultPresetID : record.background_value)
         }
 
         var crop: CGRect?
@@ -200,6 +218,25 @@ public enum DocumentStore {
             backgroundBlur: CGFloat(record.background_blur),
             crop: crop
         )
+    }
+
+    /// The background picture a document names, if it may be used (ADR-0002).
+    ///
+    /// Inside the edit file's folder, or approved on this Mac before: used.
+    /// Elsewhere: only after `confirm` says yes, which is then remembered.
+    /// Missing file or a no: nil, and the caller falls back to the default preset.
+    private static func usableBackground(_ stored: String, sidecar: URL, confirm: BackgroundConfirmation) -> URL? {
+        guard let resolved = PixCapBridge.shared.resolveDocumentPath(sidecar: sidecar.path, stored: stored) else {
+            return nil
+        }
+
+        let url = URL(fileURLWithPath: resolved.path)
+        if resolved.in_document_folder || BackgroundTrust.isTrusted(resolved.path) {
+            return url
+        }
+        guard confirm(url) else { return nil }
+        BackgroundTrust.remember(url)
+        return url
     }
 
     private static func decode(_ record: AnnotationRecordDTO) -> AnnotationItem {

@@ -512,6 +512,8 @@ public struct EditorWindowView: View {
         panel.allowedContentTypes = [.image]
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url {
+            // Chosen here, so reopening this edit later must not ask about it (ADR-0002).
+            BackgroundTrust.remember(url)
             config.background = .customImage(url: url)
         }
     }

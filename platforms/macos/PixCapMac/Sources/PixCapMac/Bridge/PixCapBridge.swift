@@ -53,6 +53,12 @@ func pixcap_document_read(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer
 @_silgen_name("pixcap_document_sidecar_path")
 func pixcap_document_sidecar_path(_ imagePath: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 
+@_silgen_name("pixcap_document_relative_path")
+func pixcap_document_relative_path(_ sidecarPath: UnsafePointer<CChar>?, _ targetPath: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("pixcap_document_resolve_path")
+func pixcap_document_resolve_path(_ sidecarPath: UnsafePointer<CChar>?, _ stored: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+
 @_silgen_name("pixcap_stitch_scroll_frames")
 func pixcap_stitch_scroll_frames(_ pathsJSON: UnsafePointer<CChar>?, _ outputPath: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 
@@ -264,6 +270,36 @@ public final class PixCapBridge {
                 pixcap_document_write(jsonPtr, pathPtr) == 0
             }
         }
+    }
+
+    /// A path field of an edit document after the core has resolved it.
+    public struct ResolvedDocumentPath: Decodable {
+        /// Canonical absolute path.
+        public let path: String
+        /// True when the file lies inside the edit document's own folder.
+        public let in_document_folder: Bool
+    }
+
+    /// The value to store for `target` in the edit document at `sidecar`:
+    /// relative to the document's folder where possible (ADR-0002).
+    public func documentRelativePath(sidecar: String, target: String) -> String {
+        sidecar.withCString { sidecarPtr in
+            target.withCString { targetPtr in
+                consumeRustString(pixcap_document_relative_path(sidecarPtr, targetPtr))
+            }
+        } ?? target
+    }
+
+    /// Resolves a stored path field of the edit document at `sidecar`, or nil
+    /// when it is empty or the file does not exist.
+    public func resolveDocumentPath(sidecar: String, stored: String) -> ResolvedDocumentPath? {
+        let json = sidecar.withCString { sidecarPtr in
+            stored.withCString { storedPtr in
+                consumeRustString(pixcap_document_resolve_path(sidecarPtr, storedPtr))
+            }
+        }
+        guard let data = json?.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ResolvedDocumentPath.self, from: data)
     }
 
     /// Reads a document, returning JSON with any missing fields defaulted.

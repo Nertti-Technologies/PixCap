@@ -304,7 +304,88 @@ fn bounded(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
     }
 }
 
+/// A path field of an edit document, resolved against the document's folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedPath {
+    /// Canonical absolute path: symlinks and `..` resolved.
+    pub path: String,
+    /// True when the file lies inside the edit document's own folder.
+    pub in_document_folder: bool,
+}
+
+/// The value to store for `target` in the edit document at `sidecar` (ADR-0002).
+///
+/// Paths are stored relative to the document's folder, joined with `/` so a
+/// document reads the same on macOS and Windows, which keeps the account name
+/// and folder layout out of shared edit files. A target with no common root
+/// (another drive on Windows), or input that is not a plain absolute path,
+/// is stored as given.
+pub fn relative_to_sidecar(sidecar: &str, target: &str) -> String {
+    use std::path::Component;
+
+    let (Some(base), target_path) = (Path::new(sidecar).parent(), Path::new(target)) else {
+        return target.to_string();
+    };
+    if !base.is_absolute() || !target_path.is_absolute() {
+        return target.to_string();
+    }
+
+    let base: Vec<Component> = base.components().collect();
+    let goal: Vec<Component> = target_path.components().collect();
+    if base.first() != goal.first() {
+        return target.to_string();
+    }
+
+    let common = base.iter().zip(&goal).take_while(|(a, b)| a == b).count();
+    let plain = |c: &Component| matches!(c, Component::Normal(_));
+    if !base[common..].iter().all(plain) || !goal[common..].iter().all(plain) || common == goal.len() {
+        return target.to_string();
+    }
+
+    let mut parts: Vec<&str> = vec![".."; base.len() - common];
+    for component in &goal[common..] {
+        match component.as_os_str().to_str() {
+            Some(part) => parts.push(part),
+            None => return target.to_string(),
+        }
+    }
+    parts.join("/")
+}
+
+/// Resolves a stored path field of the edit document at `sidecar` (ADR-0002).
+///
+/// Relative values are taken from the document's folder; absolute values,
+/// written by builds before ADR-0002, are used as they are. Returns `None`
+/// when the value is empty or the file does not exist, so the caller falls
+/// back to its default. The result is canonical, so `in_document_folder`
+/// cannot be fooled by `..` or by a symlink inside the folder pointing out.
+pub fn resolve_from_sidecar(sidecar: &str, stored: &str) -> Option<ResolvedPath> {
+    if stored.is_empty() || stored.contains('\0') {
+        return None;
+    }
+
+    let folder = Path::new(sidecar).parent()?;
+    let candidate = Path::new(stored);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        folder.join(candidate)
+    };
+
+    let path = fs::canonicalize(joined).ok()?;
+    let folder = fs::canonicalize(folder).ok()?;
+    Some(ResolvedPath {
+        in_document_folder: path.starts_with(&folder),
+        path: path.to_str()?.to_string(),
+    })
+}
+
 /// Sidecar path for an image: `shot.png` becomes `shot.pixcap.json`.
+///
+/// The sidecar always sits in the image's folder. The Windows shell relies on
+/// this: it stores `source_image` as the bare file name (`PixCapCore.cs`,
+/// ADR-0002) instead of calling `relative_to_sidecar`. Moving sidecars to
+/// another folder must update that writer too.
 pub fn sidecar_path(image_path: &str) -> String {
     let path = PathBuf::from(image_path);
     let stem = path
@@ -320,6 +401,67 @@ pub fn sidecar_path(image_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_are_stored_relative_to_the_edit_file() {
+        let sidecar = "/Users/alex/Pictures/PixCap/shot.pixcap.json";
+        assert_eq!(relative_to_sidecar(sidecar, "/Users/alex/Pictures/PixCap/shot.png"), "shot.png");
+        assert_eq!(
+            relative_to_sidecar(sidecar, "/Users/alex/Pictures/Wallpapers/sea.jpg"),
+            "../Wallpapers/sea.jpg"
+        );
+        assert_eq!(relative_to_sidecar(sidecar, "/Library/Desktop/a.heic"), "../../../../Library/Desktop/a.heic");
+        // Anything that is not a plain absolute path is kept as given.
+        assert_eq!(relative_to_sidecar(sidecar, "relative.png"), "relative.png");
+        assert_eq!(relative_to_sidecar(sidecar, "/Users/alex/../x.png"), "/Users/alex/../x.png");
+        assert_eq!(relative_to_sidecar(sidecar, ""), "");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn another_drive_stays_absolute() {
+        assert_eq!(relative_to_sidecar(r"C:\shots\a.pixcap.json", r"D:\bg.png"), r"D:\bg.png");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolving_checks_the_real_location() {
+        let root = std::env::temp_dir().join("pixcap-resolve-test");
+        let _ = fs::remove_dir_all(&root);
+        let folder = root.join("captures");
+        let outside = root.join("elsewhere");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(folder.join("bg.png"), b"x").unwrap();
+        fs::write(outside.join("secret.png"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.png"), folder.join("link.png")).unwrap();
+
+        let sidecar = folder.join("shot.pixcap.json");
+        let sidecar = sidecar.to_str().unwrap();
+
+        let inside = resolve_from_sidecar(sidecar, "bg.png").unwrap();
+        assert!(inside.in_document_folder);
+
+        let escaped = resolve_from_sidecar(sidecar, "../elsewhere/secret.png").unwrap();
+        assert!(!escaped.in_document_folder);
+
+        let via_link = resolve_from_sidecar(sidecar, "link.png").unwrap();
+        assert!(!via_link.in_document_folder, "a symlink must not count as inside");
+
+        let legacy = outside.join("secret.png");
+        let absolute = resolve_from_sidecar(sidecar, legacy.to_str().unwrap()).unwrap();
+        assert!(!absolute.in_document_folder);
+
+        assert!(resolve_from_sidecar(sidecar, "missing.png").is_none());
+        assert!(resolve_from_sidecar(sidecar, "").is_none());
+
+        // What is written resolves back to the same file.
+        let stored = relative_to_sidecar(sidecar, outside.join("secret.png").to_str().unwrap());
+        assert_eq!(resolve_from_sidecar(sidecar, &stored).unwrap().path, absolute.path);
+
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn hostile_numbers_are_pulled_into_editor_ranges() {

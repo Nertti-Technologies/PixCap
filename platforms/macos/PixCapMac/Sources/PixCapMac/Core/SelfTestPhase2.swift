@@ -49,7 +49,8 @@ extension SelfTest {
         check("document sidecar written", sidecar != nil)
         check("sidecar path derived by the core", sidecar?.lastPathComponent == "capture.pixcap.json")
 
-        let loaded = DocumentStore.load(forImage: imageURL)
+        let sidecarURL = DocumentStore.sidecarURL(forImage: imageURL)
+        let loaded = DocumentStore.load(sidecar: sidecarURL, confirmBackground: { _ in false })
         check("document reloads", loaded != nil)
         check("annotation count survives the round trip", loaded?.items.count == 4)
         check("crop survives the round trip", loaded?.config.crop == config.crop)
@@ -58,6 +59,66 @@ extension SelfTest {
         check("spotlight dim survives", loaded?.items[1].spotlightDim == 0.7)
         check("dashed flag survives", loaded?.items[3].dashed == true)
         check("tool identities survive", loaded?.items.map(\.tool) == [.arrow, .spotlight, .redaction, .line])
+
+        // MARK: Paths in edit files (ADR-0002)
+
+        // Scratch defaults, so the trust list of the real app is never touched.
+        let trustSuite = "app.pixcap.selftest.trust"
+        let realDefaults = BackgroundTrust.defaults
+        UserDefaults().removePersistentDomain(forName: trustSuite)
+        BackgroundTrust.defaults = UserDefaults(suiteName: trustSuite) ?? realDefaults
+
+        let savedJSON = (try? String(contentsOf: sidecarURL, encoding: .utf8)) ?? ""
+        let savedFields = (try? JSONSerialization.jsonObject(with: Data(savedJSON.utf8))) as? [String: Any]
+        check("edit file stores the image by name only", savedFields?["source_image"] as? String == "capture.png")
+        check("edit file holds no absolute path", !savedJSON.contains(workDirectory.path))
+        check("source image resolves next to the edit file",
+              loaded?.sourceImageURL.standardizedFileURL == imageURL.standardizedFileURL)
+
+        // A background from another folder, as a file from someone else would name it.
+        let elsewhere = workDirectory.deletingLastPathComponent()
+            .appendingPathComponent("pixcap-selftest-elsewhere-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let outsidePicture = elsewhere.appendingPathComponent("private.png")
+        if let data = ImageExporter.data(from: source, format: .png) {
+            try? data.write(to: outsidePicture)
+        }
+
+        var outsideConfig = config
+        outsideConfig.background = .customImage(url: outsidePicture)
+        DocumentStore.save(sourceImageURL: imageURL, config: outsideConfig, items: [])
+        let outsideJSON = (try? String(contentsOf: sidecarURL, encoding: .utf8)) ?? ""
+        check("background is stored relative to the edit file", outsideJSON.contains("../pixcap-selftest-elsewhere-"))
+
+        var asked = 0
+        let refused = DocumentStore.load(sidecar: sidecarURL, confirmBackground: { _ in asked += 1; return false })
+        check("outside background asks first", asked == 1)
+        check("refused background falls back to a preset", {
+            if case .preset = refused?.config.background { return true } else { return false }
+        }())
+
+        let accepted = DocumentStore.load(sidecar: sidecarURL, confirmBackground: { _ in true })
+        check("accepted background is used", {
+            if case .customImage = accepted?.config.background { return true } else { return false }
+        }())
+
+        asked = 0
+        _ = DocumentStore.load(sidecar: sidecarURL, confirmBackground: { _ in asked += 1; return false })
+        check("an accepted background is not asked about again", asked == 0)
+
+        // A background inside the edit file's own folder never asks.
+        let insidePicture = workDirectory.appendingPathComponent("bg.png")
+        try? FileManager.default.copyItem(at: outsidePicture, to: insidePicture)
+        var insideConfig = config
+        insideConfig.background = .customImage(url: insidePicture)
+        DocumentStore.save(sourceImageURL: imageURL, config: insideConfig, items: [])
+        asked = 0
+        _ = DocumentStore.load(sidecar: sidecarURL, confirmBackground: { _ in asked += 1; return false })
+        check("a background beside the edit file loads without asking", asked == 0)
+
+        BackgroundTrust.defaults = realDefaults
+        UserDefaults().removePersistentDomain(forName: trustSuite)
+        try? FileManager.default.removeItem(at: elsewhere)
 
         // MARK: Crop-aware layout
 

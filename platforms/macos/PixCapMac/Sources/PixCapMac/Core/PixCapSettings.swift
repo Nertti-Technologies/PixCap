@@ -70,6 +70,9 @@ public enum SettingsKey {
     public static let gifFPS = "pixcapGifFPS"
     public static let showCountdown = "pixcapShowCountdown"
 
+    // Edit documents (ADR-0002)
+    public static let trustedBackgroundImages = "pixcapTrustedBackgroundImages"
+
     // IDE & CLI
     public static let enableIpcServer = "pixcapEnableIpcServer"
     public static let autoStartIpc = "pixcapAutoStartIpc"
