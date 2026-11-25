@@ -8,7 +8,7 @@
 ;   winget install JRSoftware.InnoSetup
 
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.0.1"
 #endif
 #ifndef Arch
   #define Arch "arm64"

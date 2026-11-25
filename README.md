@@ -69,13 +69,13 @@ covers is dropped before it reaches the clipboard.
 ## Installing
 
 Grab the latest build from
-[Releases](https://github.com/isureshsubramanian/PixCap/releases/latest).
+[Releases](https://github.com/Nertti-Technologies/PixCap/releases/latest).
 
 | Platform | Download |
 |:--|:--|
-| **macOS** 14+, Apple silicon and Intel | `PixCap-2.0.0.dmg` — signed and notarised |
-| **Windows** 10 (1903+) on ARM | `PixCap-2.0.0-arm64-setup.exe` |
-| **Windows** 10 (1903+) on Intel or AMD | `PixCap-2.0.0-x64-setup.exe` |
+| **macOS** 14+, Apple silicon | `PixCap-2.0.1.dmg` — signed and notarised |
+| **Windows** 10 (2004+) on ARM | `PixCap-2.0.1-arm64-setup.exe` |
+| **Windows** 10 (2004+) on Intel or AMD | `PixCap-2.0.1-x64-setup.exe` |
 
 The Windows installers are **not code-signed** yet, so SmartScreen shows
 *"Windows protected your PC"* — choose **More info → Run anyway**. Checksums

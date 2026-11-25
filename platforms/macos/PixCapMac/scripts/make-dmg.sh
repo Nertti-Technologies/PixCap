@@ -13,7 +13,7 @@ set -euo pipefail
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$PACKAGE_DIR/build"
 APP="$BUILD_DIR/PixCap.app"
-VERSION="${1:-$(defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo 2.0.0)}"
+VERSION="${1:-$(defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo 2.0.1)}"
 DMG="$BUILD_DIR/PixCap-$VERSION.dmg"
 STAGING="$BUILD_DIR/dmg-staging"
 

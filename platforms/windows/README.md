@@ -102,8 +102,8 @@ winget install JRSoftware.InnoSetup     # once
 Installers land in `dist\`:
 
 ```
-dist\PixCap-2.0.0-arm64-setup.exe
-dist\PixCap-2.0.0-x64-setup.exe
+dist\PixCap-2.0.1-arm64-setup.exe
+dist\PixCap-2.0.1-x64-setup.exe
 ```
 
 They install per-user by default, so no UAC prompt, and offer optional desktop
