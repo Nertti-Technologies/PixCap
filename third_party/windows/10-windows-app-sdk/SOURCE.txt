@@ -1,0 +1,7 @@
+Component: Windows App SDK 1.6.240923002 (NuGet Microsoft.WindowsAppSDK): Microsoft.WinUI.dll,
+Microsoft.WindowsAppRuntime.Bootstrap*.dll, Microsoft.InteractiveExperiences.Projection.dll and the
+Microsoft.Windows.*.Projection.dll files installed with PixCap for Windows.
+Licence: Microsoft Software License Terms (proprietary; distributable code).
+Source: license.txt and NOTICE.txt inside
+https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/1.6.240923002/microsoft.windowsappsdk.1.6.240923002.nupkg
+Retrieved: 2026-11-25

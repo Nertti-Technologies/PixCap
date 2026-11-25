@@ -1,0 +1,7 @@
+Component: Microsoft Edge WebView2 SDK 1.0.2651.64 (NuGet Microsoft.Web.WebView2, a dependency of
+the Windows App SDK): Microsoft.Web.WebView2.Core.dll, Microsoft.Web.WebView2.Core.Projection.dll
+and WebView2Loader.dll installed with PixCap for Windows.
+Licence: BSD-3-Clause (Microsoft Corporation).
+Source: LICENSE.txt and NOTICE.txt inside
+https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.2651.64/microsoft.web.webview2.1.0.2651.64.nupkg
+Retrieved: 2026-11-25
