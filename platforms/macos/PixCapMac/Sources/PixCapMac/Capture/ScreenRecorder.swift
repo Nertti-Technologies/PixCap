@@ -98,6 +98,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     private var pausedOffset: CMTime = .zero
     private var resumedAt: CMTime = .zero
     private var lastVideoTime: CMTime = .invalid
+    private var lastAudioEnd: CMTime = .invalid
     private var captureClock: CMClock = CMClockGetHostTimeClock()
 
     private var clockNow: CMTime { CMClockGetTime(captureClock) }
@@ -175,6 +176,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         pausedAt = nil
         resumedAt = .zero
         lastVideoTime = .invalid
+        lastAudioEnd = .invalid
         sessionStarted = false
 
         let fps = Double(Settings.string(format == .gif ? SettingsKey.gifFPS : SettingsKey.videoFPS, default: format == .gif ? "15" : "60")) ?? 30
@@ -326,7 +328,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
 
     public func togglePause() {
         guard isRecording else { return }
-        queue.sync {
+        isPaused = queue.sync {
             if pausedAt != nil {
                 let now = clockNow
                 if let pausedAt {
@@ -337,8 +339,8 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
             } else {
                 pausedAt = clockNow
             }
+            return pausedAt != nil
         }
-        isPaused.toggle()
     }
 
     /// True when the user asked for any audio source.
@@ -516,7 +518,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     private func appendAudioSample(_ sampleBuffer: CMSampleBuffer) {
         guard sessionStarted, let audioInput, audioInput.isReadyForMoreMediaData else { return }
         guard pausedOffset != .zero else {
-            audioInput.append(sampleBuffer)
+            if audioInput.append(sampleBuffer) { noteAudioEnd(sampleBuffer) }
             return
         }
         // Re-stamp like video, so audio stays in sync after a pause.
@@ -537,7 +539,17 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
                                                     sampleTimingEntryCount: count, sampleTimingArray: &timing,
                                                     sampleBufferOut: &adjusted) == noErr,
               let adjusted else { return }
-        audioInput.append(adjusted)
+        // The last buffer before a pause can run past it; skip a buffer that
+        // would overlap it after the re-stamp.
+        if lastAudioEnd.isValid,
+           CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(adjusted), lastAudioEnd) < 0 { return }
+        if audioInput.append(adjusted) { noteAudioEnd(adjusted) }
+    }
+
+    private func noteAudioEnd(_ sampleBuffer: CMSampleBuffer) {
+        let end = CMTimeAdd(CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                            CMSampleBufferGetDuration(sampleBuffer))
+        if end.isValid { lastAudioEnd = end }
     }
 
     private func handleAudio(_ sampleBuffer: CMSampleBuffer) {
