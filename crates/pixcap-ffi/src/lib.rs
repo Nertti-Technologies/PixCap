@@ -25,6 +25,19 @@ fn into_c_string(value: String) -> *mut c_char {
     }
 }
 
+/// Runs an export body, turning a Rust panic into the export's documented failure value.
+///
+/// A panic that reaches an `extern "C"` boundary aborts the host process (Rust 1.81+),
+/// which killed the macOS and Windows shells outright. Every export goes through this
+/// so the shell gets null / -1 instead. Allocation failures still abort: they do not
+/// unwind, so input size limits are the only defence against those.
+fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).unwrap_or_else(|_| {
+        eprintln!("pixcap: internal error (panic) in an FFI call");
+        fallback
+    })
+}
+
 /// C-ABI exported function to render a code snippet to an SVG string pointer
 /// # Safety
 /// `code` and `language` must be valid, null-terminated C string pointers.
@@ -34,22 +47,24 @@ pub unsafe extern "C" fn pixcap_render_snippet(
     language: *const c_char,
     syntax_theme: *const c_char,
 ) -> *mut c_char {
-    let (Some(code_str), Some(lang_str)) = (opt_str(code), opt_str(language)) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let (Some(code_str), Some(lang_str)) = (opt_str(code), opt_str(language)) else {
+            return std::ptr::null_mut();
+        };
 
-    let theme_str = opt_str(syntax_theme).unwrap_or("base16-ocean.dark");
+        let theme_str = opt_str(syntax_theme).unwrap_or("base16-ocean.dark");
 
-    let renderer = CodeRenderer::default();
-    let mut options = RenderOptions::default();
-    options.code = code_str.to_string();
-    options.language = lang_str.to_string();
-    options.syntax_theme = theme_str.to_string();
+        let renderer = CodeRenderer::default();
+        let mut options = RenderOptions::default();
+        options.code = code_str.to_string();
+        options.language = lang_str.to_string();
+        options.syntax_theme = theme_str.to_string();
 
-    match renderer.render_svg(&options) {
-        Ok(svg) => into_c_string(svg),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match renderer.render_svg(&options) {
+            Ok(svg) => into_c_string(svg),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// C-ABI exported function to free C string allocated by Rust
@@ -57,9 +72,11 @@ pub unsafe extern "C" fn pixcap_render_snippet(
 /// `s` must be a valid pointer allocated by `CString::into_raw`.
 #[no_mangle]
 pub unsafe extern "C" fn pixcap_free_string(s: *mut c_char) {
-    if !s.is_null() {
-        let _ = CString::from_raw(s);
-    }
+    guard((), || {
+        if !s.is_null() {
+            let _ = CString::from_raw(s);
+        }
+    })
 }
 
 /// Returns the shared background preset catalogue as a JSON array.
@@ -69,10 +86,12 @@ pub unsafe extern "C" fn pixcap_free_string(s: *mut c_char) {
 /// The caller owns the returned string and must free it with `pixcap_free_string`.
 #[no_mangle]
 pub extern "C" fn pixcap_theme_presets_json() -> *mut c_char {
-    match serde_json::to_string(&ThemePresets::all()) {
-        Ok(json) => into_c_string(json),
-        Err(_) => std::ptr::null_mut(),
-    }
+    guard(std::ptr::null_mut(), || {
+        match serde_json::to_string(&ThemePresets::all()) {
+            Ok(json) => into_c_string(json),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Resolves a file naming pattern (`{date}`, `{app}`, `{counter}`, …) against a capture context.
@@ -91,20 +110,22 @@ pub unsafe extern "C" fn pixcap_resolve_filename(
     height: c_uint,
     counter: c_uint,
 ) -> *mut c_char {
-    let Some(pattern_str) = opt_str(pattern) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let Some(pattern_str) = opt_str(pattern) else {
+            return std::ptr::null_mut();
+        };
 
-    let context = CaptureContext {
-        mode: opt_str(mode).unwrap_or("area").to_string(),
-        app_name: opt_str(app_name).map(str::to_string),
-        window_title: opt_str(window_title).map(str::to_string),
-        width: width as u32,
-        height: height as u32,
-        counter: counter as u32,
-    };
+        let context = CaptureContext {
+            mode: opt_str(mode).unwrap_or("area").to_string(),
+            app_name: opt_str(app_name).map(str::to_string),
+            window_title: opt_str(window_title).map(str::to_string),
+            width: width as u32,
+            height: height as u32,
+            counter: counter as u32,
+        };
 
-    into_c_string(pixcap_core::resolve_filename(pattern_str, &context))
+        into_c_string(pixcap_core::resolve_filename(pattern_str, &context))
+    })
 }
 
 /// Returns the default file naming pattern.
@@ -112,7 +133,9 @@ pub unsafe extern "C" fn pixcap_resolve_filename(
 /// The caller owns the returned string and must free it with `pixcap_free_string`.
 #[no_mangle]
 pub extern "C" fn pixcap_default_naming_pattern() -> *mut c_char {
-    into_c_string(pixcap_core::default_pattern().to_string())
+    guard(std::ptr::null_mut(), || {
+        into_c_string(pixcap_core::default_pattern().to_string())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -131,14 +154,16 @@ pub extern "C" fn pixcap_default_naming_pattern() -> *mut c_char {
 /// `db_path` must be a valid, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn pixcap_history_open(db_path: *const c_char) -> *mut HistoryDb {
-    let Some(path) = opt_str(db_path) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let Some(path) = opt_str(db_path) else {
+            return std::ptr::null_mut();
+        };
 
-    match HistoryDb::new(path) {
-        Ok(db) => Box::into_raw(Box::new(db)),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match HistoryDb::new(path) {
+            Ok(db) => Box::into_raw(Box::new(db)),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Closes a history handle previously returned by `pixcap_history_open`.
@@ -147,9 +172,11 @@ pub unsafe extern "C" fn pixcap_history_open(db_path: *const c_char) -> *mut His
 /// `handle` must be null or a handle from `pixcap_history_open` that has not already been closed.
 #[no_mangle]
 pub unsafe extern "C" fn pixcap_history_close(handle: *mut HistoryDb) {
-    if !handle.is_null() {
-        drop(Box::from_raw(handle));
-    }
+    guard((), || {
+        if !handle.is_null() {
+            drop(Box::from_raw(handle));
+        }
+    })
 }
 
 /// Inserts a `ScreenshotRecord` supplied as JSON. Returns the new row id, or -1 on failure.
@@ -161,17 +188,19 @@ pub unsafe extern "C" fn pixcap_history_insert(
     handle: *mut HistoryDb,
     record_json: *const c_char,
 ) -> c_longlong {
-    let Some(db) = handle.as_ref() else {
-        return -1;
-    };
-    let Some(json) = opt_str(record_json) else {
-        return -1;
-    };
-    let Ok(record) = serde_json::from_str::<ScreenshotRecord>(json) else {
-        return -1;
-    };
+    guard(-1, || {
+        let Some(db) = handle.as_ref() else {
+            return -1;
+        };
+        let Some(json) = opt_str(record_json) else {
+            return -1;
+        };
+        let Ok(record) = serde_json::from_str::<ScreenshotRecord>(json) else {
+            return -1;
+        };
 
-    db.insert_screenshot(&record).unwrap_or(-1)
+        db.insert_screenshot(&record).unwrap_or(-1)
+    })
 }
 
 /// Returns the most recent records as a JSON array, newest first.
@@ -185,16 +214,18 @@ pub unsafe extern "C" fn pixcap_history_recent(
     handle: *mut HistoryDb,
     limit: c_longlong,
 ) -> *mut c_char {
-    let Some(db) = handle.as_ref() else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let Some(db) = handle.as_ref() else {
+            return std::ptr::null_mut();
+        };
 
-    match db.get_recent(limit).and_then(|records| {
-        Ok(serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string()))
-    }) {
-        Ok(json) => into_c_string(json),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match db.get_recent(limit).and_then(|records| {
+            Ok(serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string()))
+        }) {
+            Ok(json) => into_c_string(json),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Searches records by OCR text or tags, returning a JSON array.
@@ -208,19 +239,21 @@ pub unsafe extern "C" fn pixcap_history_search(
     handle: *mut HistoryDb,
     query: *const c_char,
 ) -> *mut c_char {
-    let Some(db) = handle.as_ref() else {
-        return std::ptr::null_mut();
-    };
-    let Some(query_str) = opt_str(query) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let Some(db) = handle.as_ref() else {
+            return std::ptr::null_mut();
+        };
+        let Some(query_str) = opt_str(query) else {
+            return std::ptr::null_mut();
+        };
 
-    match db.search_screenshots(query_str).map(|records| {
-        serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string())
-    }) {
-        Ok(json) => into_c_string(json),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match db.search_screenshots(query_str).map(|records| {
+            serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string())
+        }) {
+            Ok(json) => into_c_string(json),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Deletes a record by id. Returns 0 on success, -1 on failure.
@@ -229,10 +262,12 @@ pub unsafe extern "C" fn pixcap_history_search(
 /// `handle` must be a live history handle.
 #[no_mangle]
 pub unsafe extern "C" fn pixcap_history_delete(handle: *mut HistoryDb, id: c_longlong) -> c_int {
-    match handle.as_ref() {
-        Some(db) if db.delete_screenshot(id).is_ok() => 0,
-        _ => -1,
-    }
+    guard(-1, || {
+        match handle.as_ref() {
+            Some(db) if db.delete_screenshot(id).is_ok() => 0,
+            _ => -1,
+        }
+    })
 }
 
 /// Toggles the favourite flag on a record. Returns 0 on success, -1 on failure.
@@ -244,10 +279,12 @@ pub unsafe extern "C" fn pixcap_history_toggle_favorite(
     handle: *mut HistoryDb,
     id: c_longlong,
 ) -> c_int {
-    match handle.as_ref() {
-        Some(db) if db.toggle_favorite(id).is_ok() => 0,
-        _ => -1,
-    }
+    guard(-1, || {
+        match handle.as_ref() {
+            Some(db) if db.toggle_favorite(id).is_ok() => 0,
+            _ => -1,
+        }
+    })
 }
 
 /// Languages the syntax engine can highlight, as a JSON array of
@@ -256,11 +293,13 @@ pub unsafe extern "C" fn pixcap_history_toggle_favorite(
 /// The caller owns the returned string and must free it with `pixcap_free_string`.
 #[no_mangle]
 pub extern "C" fn pixcap_syntax_languages_json() -> *mut c_char {
-    let highlighter = pixcap_core::SyntaxHighlighter::default();
-    match serde_json::to_string(&highlighter.available_languages()) {
-        Ok(json) => into_c_string(json),
-        Err(_) => std::ptr::null_mut(),
-    }
+    guard(std::ptr::null_mut(), || {
+        let highlighter = pixcap_core::SyntaxHighlighter::default();
+        match serde_json::to_string(&highlighter.available_languages()) {
+            Ok(json) => into_c_string(json),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Syntax colour themes bundled with the engine, as a JSON array of names.
@@ -268,11 +307,13 @@ pub extern "C" fn pixcap_syntax_languages_json() -> *mut c_char {
 /// The caller owns the returned string and must free it with `pixcap_free_string`.
 #[no_mangle]
 pub extern "C" fn pixcap_syntax_themes_json() -> *mut c_char {
-    let highlighter = pixcap_core::SyntaxHighlighter::default();
-    match serde_json::to_string(&highlighter.available_themes()) {
-        Ok(json) => into_c_string(json),
-        Err(_) => std::ptr::null_mut(),
-    }
+    guard(std::ptr::null_mut(), || {
+        let highlighter = pixcap_core::SyntaxHighlighter::default();
+        match serde_json::to_string(&highlighter.available_themes()) {
+            Ok(json) => into_c_string(json),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -290,14 +331,16 @@ pub unsafe extern "C" fn pixcap_document_write(
     document_json: *const c_char,
     path: *const c_char,
 ) -> c_int {
-    let (Some(json), Some(path_str)) = (opt_str(document_json), opt_str(path)) else {
-        return -1;
-    };
+    guard(-1, || {
+        let (Some(json), Some(path_str)) = (opt_str(document_json), opt_str(path)) else {
+            return -1;
+        };
 
-    match AnnotationDocument::from_json(json).and_then(|document| document.write(path_str)) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
+        match AnnotationDocument::from_json(json).and_then(|document| document.write(path_str)) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
+    })
 }
 
 /// Reads a document from `path`, returning normalised JSON (defaults filled in).
@@ -308,14 +351,16 @@ pub unsafe extern "C" fn pixcap_document_write(
 /// `path` must be a valid, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn pixcap_document_read(path: *const c_char) -> *mut c_char {
-    let Some(path_str) = opt_str(path) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let Some(path_str) = opt_str(path) else {
+            return std::ptr::null_mut();
+        };
 
-    match AnnotationDocument::read(path_str).and_then(|document| document.to_json()) {
-        Ok(json) => into_c_string(json),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match AnnotationDocument::read(path_str).and_then(|document| document.to_json()) {
+            Ok(json) => into_c_string(json),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Returns the sidecar path for an image path.
@@ -326,10 +371,12 @@ pub unsafe extern "C" fn pixcap_document_read(path: *const c_char) -> *mut c_cha
 /// `image_path` must be a valid, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn pixcap_document_sidecar_path(image_path: *const c_char) -> *mut c_char {
-    match opt_str(image_path) {
-        Some(path) => into_c_string(pixcap_core::sidecar_path(path)),
-        None => std::ptr::null_mut(),
-    }
+    guard(std::ptr::null_mut(), || {
+        match opt_str(image_path) {
+            Some(path) => into_c_string(pixcap_core::sidecar_path(path)),
+            None => std::ptr::null_mut(),
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -356,42 +403,44 @@ pub unsafe extern "C" fn pixcap_render_document(
     scale: f32,
     output_path: *const c_char,
 ) -> c_int {
-    let (Some(source_path), Some(json), Some(destination)) = (
-        opt_str(image_path),
-        opt_str(document_json),
-        opt_str(output_path),
-    ) else {
-        return -1;
-    };
-
-    let Ok(document) = AnnotationDocument::from_json(json) else {
-        eprintln!("pixcap: the document could not be parsed");
-        return -1;
-    };
-
-    let source = match pixcap_core::render::open_image(source_path) {
-        Ok(image) => image,
-        Err(error) => {
-            eprintln!("pixcap: could not open {source_path}: {error}");
+    guard(-1, || {
+        let (Some(source_path), Some(json), Some(destination)) = (
+            opt_str(image_path),
+            opt_str(document_json),
+            opt_str(output_path),
+        ) else {
             return -1;
-        }
-    };
+        };
 
-    let png = match pixcap_core::render_document(&source, &document, scale.max(0.1)) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("pixcap: render failed: {error}");
+        let Ok(document) = AnnotationDocument::from_json(json) else {
+            eprintln!("pixcap: the document could not be parsed");
             return -1;
-        }
-    };
+        };
 
-    match std::fs::write(destination, png) {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("pixcap: could not write {destination}: {error}");
-            -1
+        let source = match pixcap_core::render::open_image(source_path) {
+            Ok(image) => image,
+            Err(error) => {
+                eprintln!("pixcap: could not open {source_path}: {error}");
+                return -1;
+            }
+        };
+
+        let png = match pixcap_core::render_document(&source, &document, scale.max(0.1)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("pixcap: render failed: {error}");
+                return -1;
+            }
+        };
+
+        match std::fs::write(destination, png) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("pixcap: could not write {destination}: {error}");
+                -1
+            }
         }
-    }
+    })
 }
 
 /// Canvas dimensions a document would render to, as `{"width":W,"height":H}`.
@@ -407,26 +456,28 @@ pub unsafe extern "C" fn pixcap_render_canvas_size(
     source_width: c_uint,
     source_height: c_uint,
 ) -> *mut c_char {
-    let Some(json) = opt_str(document_json) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(document) = AnnotationDocument::from_json(json) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let Some(json) = opt_str(document_json) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(document) = AnnotationDocument::from_json(json) else {
+            return std::ptr::null_mut();
+        };
 
-    let layout = pixcap_core::render_layout(
-        source_width as f32,
-        source_height as f32,
-        &document.canvas,
-    );
+        let layout = pixcap_core::render_layout(
+            source_width as f32,
+            source_height as f32,
+            &document.canvas,
+        );
 
-    into_c_string(
-        serde_json::json!({
-            "width": layout.canvas_width,
-            "height": layout.canvas_height
-        })
-        .to_string(),
-    )
+        into_c_string(
+            serde_json::json!({
+                "width": layout.canvas_width,
+                "height": layout.canvas_height
+            })
+            .to_string(),
+        )
+    })
 }
 
 /// Full canvas geometry for a document, as JSON.
@@ -446,36 +497,38 @@ pub unsafe extern "C" fn pixcap_render_layout(
     source_width: c_uint,
     source_height: c_uint,
 ) -> *mut c_char {
-    let Some(json) = opt_str(document_json) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(document) = AnnotationDocument::from_json(json) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let Some(json) = opt_str(document_json) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(document) = AnnotationDocument::from_json(json) else {
+            return std::ptr::null_mut();
+        };
 
-    let layout = pixcap_core::render_layout(
-        source_width as f32,
-        source_height as f32,
-        &document.canvas,
-    );
+        let layout = pixcap_core::render_layout(
+            source_width as f32,
+            source_height as f32,
+            &document.canvas,
+        );
 
-    into_c_string(
-        serde_json::json!({
-            "canvas_width": layout.canvas_width,
-            "canvas_height": layout.canvas_height,
-            "frame_x": layout.frame_x,
-            "frame_y": layout.frame_y,
-            "frame_width": layout.frame_width,
-            "frame_height": layout.frame_height,
-            "image_x": layout.image_x,
-            "image_y": layout.image_y,
-            "image_width": layout.image_width,
-            "image_height": layout.image_height,
-            "crop_x": layout.crop_x,
-            "crop_y": layout.crop_y
-        })
-        .to_string(),
-    )
+        into_c_string(
+            serde_json::json!({
+                "canvas_width": layout.canvas_width,
+                "canvas_height": layout.canvas_height,
+                "frame_x": layout.frame_x,
+                "frame_y": layout.frame_y,
+                "frame_width": layout.frame_width,
+                "frame_height": layout.frame_height,
+                "image_x": layout.image_x,
+                "image_y": layout.image_y,
+                "image_width": layout.image_width,
+                "image_height": layout.image_height,
+                "crop_x": layout.crop_x,
+                "crop_y": layout.crop_y
+            })
+            .to_string(),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -494,23 +547,25 @@ pub unsafe extern "C" fn pixcap_stitch_scroll_frames(
     paths_json: *const c_char,
     output_path: *const c_char,
 ) -> *mut c_char {
-    let (Some(json), Some(output)) = (opt_str(paths_json), opt_str(output_path)) else {
-        return std::ptr::null_mut();
-    };
+    guard(std::ptr::null_mut(), || {
+        let (Some(json), Some(output)) = (opt_str(paths_json), opt_str(output_path)) else {
+            return std::ptr::null_mut();
+        };
 
-    let Ok(paths) = serde_json::from_str::<Vec<String>>(json) else {
-        return std::ptr::null_mut();
-    };
+        let Ok(paths) = serde_json::from_str::<Vec<String>>(json) else {
+            return std::ptr::null_mut();
+        };
 
-    match pixcap_core::stitch_files(&paths, output) {
-        Ok((width, height)) => into_c_string(
-            serde_json::json!({ "width": width, "height": height }).to_string(),
-        ),
-        Err(error) => {
-            eprintln!("pixcap: stitch failed: {error}");
-            std::ptr::null_mut()
+        match pixcap_core::stitch_files(&paths, output) {
+            Ok((width, height)) => into_c_string(
+                serde_json::json!({ "width": width, "height": height }).to_string(),
+            ),
+            Err(error) => {
+                eprintln!("pixcap: stitch failed: {error}");
+                std::ptr::null_mut()
+            }
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -522,6 +577,13 @@ mod tests {
         let value = CStr::from_ptr(ptr).to_string_lossy().into_owned();
         pixcap_free_string(ptr);
         value
+    }
+
+    #[test]
+    fn guard_turns_a_panic_into_the_fallback() {
+        assert_eq!(guard(-1, || -> c_int { panic!("boom") }), -1);
+        assert!(guard(std::ptr::null_mut(), || -> *mut c_char { panic!("boom") }).is_null());
+        assert_eq!(guard(-1, || 7), 7);
     }
 
     #[test]

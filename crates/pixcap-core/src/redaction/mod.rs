@@ -53,8 +53,8 @@ impl RedactionEngine {
         for (_, regex) in &self.patterns {
             result = regex
                 .replace_all(&result, |caps: &regex::Captures| {
-                    let matched = caps.get(0).unwrap().as_str();
-                    replacement_char.to_string().repeat(matched.len())
+                    // Group 0 is the whole match and always exists.
+                    replacement_char.to_string().repeat(caps[0].len())
                 })
                 .to_string();
         }

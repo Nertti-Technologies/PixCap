@@ -11,6 +11,8 @@
 //! Passing an output path also writes the last case, so a change can be looked
 //! at as well as timed.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)] // Developer benchmark, not shipped.
+
 use image::{DynamicImage, RgbaImage};
 use pixcap_core::document::AnnotationDocument;
 use pixcap_core::render::{open_image, render_to_pixmap};

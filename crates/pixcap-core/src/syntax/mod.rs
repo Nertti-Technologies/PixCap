@@ -68,7 +68,8 @@ impl SyntaxHighlighter {
             .themes
             .get(theme_name)
             .or_else(|| self.theme_set.themes.get("base16-ocean.dark"))
-            .unwrap_or_else(|| &self.theme_set.themes["base16-ocean.dark"]);
+            .or_else(|| self.theme_set.themes.values().next())
+            .ok_or_else(|| SyntaxError::HighlightFailed("no colour theme is available".into()))?;
 
         let mut highlighter = HighlightLines::new(syntax, theme);
         let mut highlighted_lines = Vec::new();
