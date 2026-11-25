@@ -156,8 +156,19 @@ public final class CaptureWorkflowManager {
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { _, _ in
-            DispatchQueue.main.async { NSApp.terminate(nil) }
+        NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { _, error in
+            DispatchQueue.main.async {
+                // Quitting after a failed relaunch looked like a silent crash.
+                guard let error else {
+                    NSApp.terminate(nil)
+                    return
+                }
+                let alert = NSAlert()
+                alert.messageText = "PixCap could not relaunch itself"
+                alert.informativeText = "\(error.localizedDescription)\n\nQuit PixCap and open it again from Applications."
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
         }
     }
 

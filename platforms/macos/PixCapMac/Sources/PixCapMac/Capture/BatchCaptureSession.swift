@@ -223,7 +223,7 @@ enum BatchCaptureHUD {
         created.sharingType = .none
         created.contentView = NSHostingView(rootView: BatchCaptureHUDView(session: session))
 
-        if let screen = NSScreen.main {
+        if let screen = NSScreen.underCursor ?? NSScreen.main {
             let frame = screen.visibleFrame
             created.setFrameOrigin(NSPoint(x: frame.maxX - 390, y: frame.maxY - 260))
         }

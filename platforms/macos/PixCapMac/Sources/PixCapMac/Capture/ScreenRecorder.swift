@@ -44,6 +44,22 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
 
     private let queue = DispatchQueue(label: "app.pixcap.recorder")
 
+    /// True from the moment `start` claims the recorder until `stop` releases it.
+    ///
+    /// Read and written only on `queue`, so start/stop are each one atomic
+    /// check-and-set. `isRecording` (main actor, for the UI) flips only after
+    /// the stream is running, which left a window where a double hotkey press
+    /// started two streams, or a user stop and a stream-error stop both called
+    /// `finishWriting` (an AVFoundation exception that kills the app).
+    private var isActive = false
+
+    /// Called on the main actor when the stream stops on its own (for example
+    /// the recorded display was unplugged), with the finished file or nil.
+    public var onStoppedUnexpectedly: ((URL?) -> Void)?
+
+    /// One Core Image context for every GIF frame; building one per frame is expensive.
+    private let gifContext = CIContext()
+
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
@@ -81,14 +97,32 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         screen: NSScreen? = nil,
         region: CGRect? = nil
     ) async throws {
-        guard !isRecording else { throw RecorderError.alreadyRecording }
         guard ScreenCaptureEngine.shared.ensurePermission() else { throw CaptureError.permissionDenied }
+        let claimed = queue.sync { () -> Bool in
+            guard !isActive else { return false }
+            isActive = true
+            return true
+        }
+        guard claimed else { throw RecorderError.alreadyRecording }
 
-        let targetScreen = screen ?? NSScreen.main
+        do {
+            try await startClaimed(format: format, screen: screen, region: region)
+        } catch {
+            discardFailedStart()
+            throw error
+        }
+    }
+
+    private func startClaimed(format: RecordingFormat, screen: NSScreen?, region: CGRect?) async throws {
+        // Cleared first so a failed start never deletes the previous recording's file.
+        outputURL = nil
+
+        // Record the display the user is working on, as full-screen capture does.
+        let targetScreen = screen ?? NSScreen.underCursor ?? NSScreen.main
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first(where: { display in
-            guard let number = targetScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return true }
-            return display.displayID == number.uint32Value
+            guard let displayID = targetScreen?.displayID else { return true }
+            return display.displayID == displayID
         }) ?? content.displays.first else {
             throw RecorderError.noDisplay
         }
@@ -163,13 +197,44 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         }
     }
 
-    /// Stops recording and finalises the file.
+    /// Undoes a start that failed part-way: no stream left running, no empty file left behind.
+    private func discardFailedStart() {
+        // `stream` is only stored once capture is running, which is the last
+        // step that can throw, so there is never a live stream to stop here.
+        writer?.cancelWriting()
+        writer = nil
+        videoInput = nil
+        audioInput = nil
+        if let outputURL {
+            try? FileManager.default.removeItem(at: outputURL)
+            self.outputURL = nil
+        }
+        queue.sync { isActive = false }
+    }
+
+    /// Atomically releases the recorder. True only for the one caller that should finish it.
+    private func claimStop() -> Bool {
+        queue.sync {
+            let wasActive = isActive
+            isActive = false
+            return wasActive
+        }
+    }
+
+    /// Stops recording and finalises the file. Safe to call more than once:
+    /// only the first call does the work, later ones return nil.
     @discardableResult
     public func stop() async -> URL? {
-        guard isRecording else { return nil }
+        guard claimStop() else { return nil }
+        return await finish()
+    }
 
+    private func finish() async -> URL? {
         try? await stream?.stopCapture()
         stream = nil
+        // Let any sample callback already running on the queue finish before
+        // the inputs are marked finished; new ones now return at `isActive`.
+        queue.sync {}
 
         await MainActor.run {
             self.isRecording = false
@@ -312,7 +377,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     // MARK: - SCStreamOutput
 
     public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        guard isActive, CMSampleBufferDataIsReady(sampleBuffer) else { return }
 
         switch type {
         case .screen:
@@ -326,7 +391,12 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
         NSLog("PixCap: capture stream stopped — \(error.localizedDescription)")
-        Task { await stop() }
+        // A user stop that already ran owns the UI update; only report if this call did the stop.
+        guard claimStop() else { return }
+        Task {
+            let url = await finish()
+            await MainActor.run { self.onStoppedUnexpectedly?(url) }
+        }
     }
 
     private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
@@ -406,7 +476,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
+        let context = gifContext
 
         let scale = min(1, gifMaxWidth / max(ciImage.extent.width, 1))
         let scaled = scale < 1

@@ -112,7 +112,7 @@ public final class QuickAccessOverlayController {
             closeAction: dismiss
         ))
 
-        if let screen = NSScreen.main {
+        if let screen = NSScreen.underCursor ?? NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: frame.maxX - panel.frame.width - 20, y: frame.minY + 20))
         }

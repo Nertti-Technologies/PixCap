@@ -11,6 +11,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         Settings.registerDefaults()
         setupMenuBar()
         registerHotkeys()
+        ScreenRecorder.shared.onStoppedUnexpectedly = { [weak self] url in
+            self?.recordingDidStop(url: url)
+        }
 
         // Appearance preferences apply at launch and whenever they change.
         AppearanceManager.onMenuBarStyleChange = { [weak self] in self?.applyMenuBarStyle() }
@@ -103,12 +106,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    private func disabledItem(_ title: String) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        return item
-    }
-
     // MARK: - Hotkeys
 
     private func registerHotkeys() {
@@ -167,15 +164,36 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopRecording() {
         Task { @MainActor in
             let url = await ScreenRecorder.shared.stop()
-            RecordingControlsController.hide()
-            recordingMenuItem?.title = "Record Screen"
+            recordingDidStop(url: url)
+        }
+    }
 
-            guard let url else {
-                CaptureWorkflowManager.shared.handleFailure(ScreenRecorder.RecorderError.nothingRecorded)
-                return
+    /// Resets the recording UI and files the result, however the recording ended.
+    private func recordingDidStop(url: URL?) {
+        RecordingControlsController.hide()
+        recordingMenuItem?.title = "Record Screen"
+
+        guard let url else {
+            CaptureWorkflowManager.shared.handleFailure(ScreenRecorder.RecorderError.nothingRecorded)
+            return
+        }
+
+        CaptureWorkflowManager.shared.handleRecording(url: url)
+    }
+
+    // MARK: - Region selection
+
+    /// Shows the region selector on every display, then runs `body` with the
+    /// chosen rect (global AppKit coordinates) once the overlay has gone.
+    private func selectRegion(then body: @escaping @MainActor (CGRect, NSScreen?) async -> Void) {
+        RegionSelectionWindowController.present { rect, screen in
+            guard let rect else { return }
+
+            Task { @MainActor in
+                // Let the overlay windows fully disappear before the shutter fires.
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                await body(rect, screen)
             }
-
-            CaptureWorkflowManager.shared.handleRecording(url: url)
         }
     }
 
@@ -183,40 +201,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Selects a region, recognises its text, and copies it to the clipboard.
     private func captureText() {
-        RegionSelectionWindowController.present { rect, screen in
-            guard let rect else { return }
+        selectRegion { rect, screen in
+            do {
+                let result = try await ScreenCaptureEngine.shared.captureRegion(rect: rect, on: screen)
+                let recognition = try OCRService.recognize(
+                    in: result.image,
+                    includeBarcodes: Settings.bool(SettingsKey.ocrDetectBarcodes)
+                )
 
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                do {
-                    let result = try await ScreenCaptureEngine.shared.captureRegion(rect: rect, on: screen)
-                    let recognition = try OCRService.recognize(
-                        in: result.image,
-                        includeBarcodes: Settings.bool(SettingsKey.ocrDetectBarcodes)
-                    )
-
-                    guard !recognition.isEmpty else {
-                        CaptureWorkflowManager.shared.notifyPublic(
-                            title: "No text found",
-                            body: "PixCap could not recognise any text in that region."
-                        )
-                        return
-                    }
-
-                    let preserve = Settings.bool(SettingsKey.ocrPreserveLineBreaks)
-                    var text = preserve ? recognition.textPreservingLineBreaks : recognition.textAsParagraph
-                    if text.isEmpty, let barcode = recognition.barcodes.first { text = barcode }
-
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-
+                guard !recognition.isEmpty else {
                     CaptureWorkflowManager.shared.notifyPublic(
-                        title: "Text copied",
-                        body: "\(recognition.lines.count) lines\(recognition.barcodes.isEmpty ? "" : " · \(recognition.barcodes.count) code(s)")"
+                        title: "No text found",
+                        body: "PixCap could not recognise any text in that region."
                     )
-                } catch {
-                    CaptureWorkflowManager.shared.handleFailure(error)
+                    return
                 }
+
+                let preserve = Settings.bool(SettingsKey.ocrPreserveLineBreaks)
+                var text = preserve ? recognition.textPreservingLineBreaks : recognition.textAsParagraph
+                if text.isEmpty, let barcode = recognition.barcodes.first { text = barcode }
+
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+
+                CaptureWorkflowManager.shared.notifyPublic(
+                    title: "Text copied",
+                    body: "\(recognition.lines.count) lines\(recognition.barcodes.isEmpty ? "" : " · \(recognition.barcodes.count) code(s)")"
+                )
+            } catch {
+                CaptureWorkflowManager.shared.handleFailure(error)
             }
         }
     }
@@ -224,15 +237,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Scrolling capture
 
     private func startScrollingCapture() {
-        RegionSelectionWindowController.present { rect, screen in
-            guard let rect else { return }
-
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                ScrollingCaptureController.shared.begin(region: rect, screen: screen) { result in
-                    guard let result else { return }
-                    CaptureWorkflowManager.shared.handleCapture(result)
-                }
+        selectRegion { rect, screen in
+            ScrollingCaptureController.shared.begin(region: rect, screen: screen) { result in
+                guard let result else { return }
+                CaptureWorkflowManager.shared.handleCapture(result)
             }
         }
     }
@@ -253,17 +261,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Pins
 
     private func pinCapture() {
-        RegionSelectionWindowController.present { rect, screen in
-            guard let rect else { return }
-
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                do {
-                    let result = try await ScreenCaptureEngine.shared.captureRegion(rect: rect, on: screen)
-                    PinnedWindowController.pin(image: result.image, at: CGPoint(x: rect.minX, y: rect.minY))
-                } catch {
-                    CaptureWorkflowManager.shared.handleFailure(error)
-                }
+        selectRegion { rect, screen in
+            do {
+                let result = try await ScreenCaptureEngine.shared.captureRegion(rect: rect, on: screen)
+                PinnedWindowController.pin(image: result.image, at: CGPoint(x: rect.minX, y: rect.minY))
+            } catch {
+                CaptureWorkflowManager.shared.handleFailure(error)
             }
         }
     }
@@ -275,15 +278,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// - Parameter override: temporarily forces a different after-capture action
     ///   (used by the "& Copy" / "& Save" shortcuts).
     private func captureArea(override: Settings.AfterCaptureAction? = nil) {
-        RegionSelectionWindowController.present { rect, screen in
-            guard let rect else { return }
-
-            Task { @MainActor in
-                // Let the overlay windows fully disappear before the shutter fires.
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                await self.runCapture(override: override) {
-                    try await ScreenCaptureEngine.shared.captureRegion(rect: rect, on: screen)
-                }
+        selectRegion { rect, screen in
+            await self.runCapture(override: override) {
+                try await ScreenCaptureEngine.shared.captureRegion(rect: rect, on: screen)
             }
         }
     }

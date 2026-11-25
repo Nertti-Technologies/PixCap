@@ -144,6 +144,12 @@ public enum SelfTest {
         check("hotkey renders modifiers (\(defaultBinding.displayString))", defaultBinding.displayString.contains("⌥"))
 
         // 7. Colour helpers used by annotation defaults.
+        // The region overlay must cover each display exactly, not just the primary.
+        let misplaced = NSScreen.screens.filter {
+            RegionSelectionWindowController.makeOverlayWindow(for: $0).frame != $0.frame
+        }
+        check("region overlay covers every display (\(NSScreen.screens.count) found)", misplaced.isEmpty)
+
         check("hex parses to colour", NSColor(hex: "#FF3366") != nil)
         check("colour round-trips to hex", NSColor(hex: "#FF3366")?.hexString == "#FF3366")
         check("malformed hex rejected", NSColor(hex: "#ZZZ") == nil)

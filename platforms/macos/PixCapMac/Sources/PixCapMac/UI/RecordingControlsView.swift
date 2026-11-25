@@ -72,7 +72,7 @@ public enum RecordingControlsController {
 
         created.contentView = NSHostingView(rootView: RecordingControlsView(onStop: onStop))
 
-        if let screen = NSScreen.main {
+        if let screen = NSScreen.underCursor ?? NSScreen.main {
             let frame = screen.visibleFrame
             created.setFrameOrigin(NSPoint(x: frame.midX - 115, y: frame.minY + 40))
         }

@@ -33,7 +33,7 @@ public final class CountdownOverlayController {
         let view = CountdownView(value: remaining)
         created.contentView = NSHostingView(rootView: view)
 
-        if let screen = NSScreen.main {
+        if let screen = NSScreen.underCursor ?? NSScreen.main {
             let frame = screen.frame
             created.setFrameOrigin(NSPoint(x: frame.midX - 90, y: frame.midY - 90))
         }

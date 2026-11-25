@@ -50,7 +50,7 @@ public final class ScreenCaptureEngine {
     public func captureDisplay(screen: NSScreen? = nil) async throws -> CaptureResult {
         guard ensurePermission() else { throw CaptureError.permissionDenied }
 
-        let targetScreen = screen ?? screenUnderCursor() ?? NSScreen.main
+        let targetScreen = screen ?? NSScreen.underCursor ?? NSScreen.main
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard let display = display(for: targetScreen, in: content) else {
@@ -136,7 +136,7 @@ public final class ScreenCaptureEngine {
         let window = candidates.first { $0.owningApplication?.processID == frontmostPID } ?? candidates.first
 
         guard let window else { throw CaptureError.windowNotFound }
-        return try await capture(window: window)
+        return try await capture(window: window, in: content)
     }
 
     public func captureWindow(windowID: CGWindowID) async throws -> CaptureResult {
@@ -146,11 +146,11 @@ public final class ScreenCaptureEngine {
         guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
             throw CaptureError.windowNotFound
         }
-        return try await capture(window: window)
+        return try await capture(window: window, in: content)
     }
 
-    private func capture(window: SCWindow) async throws -> CaptureResult {
-        let scale = Settings.renderScale(for: screenContaining(window.frame))
+    private func capture(window: SCWindow, in content: SCShareableContent) async throws -> CaptureResult {
+        let scale = Settings.renderScale(for: screen(showing: window, in: content))
         let filter = SCContentFilter(desktopIndependentWindow: window)
 
         let configuration = SCStreamConfiguration()
@@ -192,19 +192,49 @@ public final class ScreenCaptureEngine {
     }
 
     private func display(for screen: NSScreen?, in content: SCShareableContent) -> SCDisplay? {
-        guard let screen,
-              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+        guard let displayID = screen?.displayID else {
             return content.displays.first
         }
-        return content.displays.first { $0.displayID == number.uint32Value } ?? content.displays.first
+        return content.displays.first { $0.displayID == displayID } ?? content.displays.first
     }
 
-    private func screenUnderCursor() -> NSScreen? {
-        let location = NSEvent.mouseLocation
-        return NSScreen.screens.first { $0.frame.contains(location) }
+    /// The screen showing most of `window`.
+    ///
+    /// `SCWindow.frame` and `SCDisplay.frame` share Core Graphics global
+    /// coordinates (top-left origin), unlike `NSScreen.frame` (bottom-left), so
+    /// the match is made between those two and then mapped by display ID. Mixing
+    /// the systems picked the wrong screen on stacked displays and captured at
+    /// the wrong scale on mixed Retina/non-Retina setups.
+    private func screen(showing window: SCWindow, in content: SCShareableContent) -> NSScreen? {
+        let display = content.displays.max { lhs, rhs in
+            lhs.frame.intersection(window.frame).area < rhs.frame.intersection(window.frame).area
+        }
+        guard let display else { return nil }
+        return NSScreen.screens.first { $0.displayID == display.displayID }
     }
 
     private func screenContaining(_ rect: CGRect) -> NSScreen? {
         NSScreen.screens.first { $0.frame.intersects(rect) }
     }
+}
+
+extension NSScreen {
+    /// The screen holding the mouse pointer: the one the user is working on.
+    ///
+    /// Prefer this to `NSScreen.main` for placing capture UI. For a menu-bar app,
+    /// `main` is the screen with the key window, which is often not where the
+    /// user is looking on a multi-monitor setup.
+    static var underCursor: NSScreen? {
+        let location = NSEvent.mouseLocation
+        return screens.first { NSMouseInRect(location, $0.frame, false) }
+    }
+
+    /// The Core Graphics display ID, which ScreenCaptureKit uses to name displays.
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
+private extension CGRect {
+    var area: CGFloat { isNull ? 0 : width * height }
 }

@@ -195,7 +195,7 @@ enum ScrollingCaptureHUD {
         created.sharingType = .none
         created.contentView = NSHostingView(rootView: ScrollingCaptureHUDView(controller: controller))
 
-        if let screen = NSScreen.main {
+        if let screen = NSScreen.underCursor ?? NSScreen.main {
             let frame = screen.visibleFrame
             created.setFrameOrigin(NSPoint(x: frame.maxX - 350, y: frame.midY))
         }

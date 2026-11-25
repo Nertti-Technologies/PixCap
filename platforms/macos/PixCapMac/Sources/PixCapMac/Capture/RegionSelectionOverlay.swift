@@ -124,18 +124,14 @@ public final class RegionSelectionOverlayView: NSView {
     }
 
     override public func mouseUp(with event: NSEvent) {
-        guard let rect = selectionRect, rect.width > 10, rect.height > 10, let screen = window?.screen else {
+        guard let rect = selectionRect, rect.width > 10, rect.height > 10,
+              let window, let screen = window.screen else {
             delegate?.didCancelRegionSelection()
             return
         }
 
-        // Convert view coordinates (screen-local, bottom-left) to global AppKit coordinates.
-        let screenRect = CGRect(
-            x: screen.frame.origin.x + rect.origin.x,
-            y: screen.frame.origin.y + rect.origin.y,
-            width: rect.width,
-            height: rect.height
-        )
+        // View coordinates (bottom-left) to global AppKit coordinates.
+        let screenRect = window.convertToScreen(convert(rect, to: nil))
 
         delegate?.didSelectRegion(screenRect, on: screen)
     }
@@ -186,13 +182,7 @@ public final class RegionSelectionWindowController: NSObject, RegionSelectionDel
         activeController = controller
 
         for screen in NSScreen.screens {
-            let window = RegionSelectionWindow(
-                contentRect: screen.frame,
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false,
-                screen: screen
-            )
+            let window = makeOverlayWindow(for: screen)
             window.level = .screenSaver
             window.isOpaque = false
             window.backgroundColor = .clear
@@ -219,6 +209,21 @@ public final class RegionSelectionWindowController: NSObject, RegionSelectionDel
         controller.didPushCursor = true
 
         controller.installEscapeMonitor()
+    }
+
+    /// A borderless window covering exactly `screen`.
+    static func makeOverlayWindow(for screen: NSScreen) -> NSWindow {
+        // With `screen:` set, AppKit reads contentRect relative to that
+        // screen's origin. Passing `screen.frame` applied the origin twice,
+        // so on every display but the primary the overlay was placed
+        // off-screen and area capture only worked on the primary display.
+        RegionSelectionWindow(
+            contentRect: NSRect(origin: .zero, size: screen.frame.size),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false,
+            screen: screen
+        )
     }
 
     /// Watches for Escape while a selection is in progress.
