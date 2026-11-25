@@ -85,15 +85,22 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     private var elapsedTimer: Timer?
 
     // Pause bookkeeping: paused time is subtracted from presentation stamps so
-    // the output has no gap. Pause and resume are read from the host clock,
-    // which ScreenCaptureKit stamps frames with. The last frame's stamp is no
-    // good: on a still screen no new frames arrive, so a long pause measured
-    // that way came out near zero and froze the GIF for the whole pause.
-    // Read and written on `queue`.
+    // the output has no gap. Pause and resume are read from the stream's own
+    // clock (`captureClock`), which stamps the samples. The last frame's stamp
+    // is no good: on a still screen no new frames arrive, so a long pause
+    // measured that way came out near zero and froze the GIF for the pause.
+    //
+    // Samples are delivered on `queue`, which owns all of these. A sample
+    // stamped before the last resume (captured during the pause, delivered
+    // late) is dropped, and video never goes backwards, because AVAssetWriter
+    // fails the whole MP4 on an out-of-order timestamp.
     private var pausedAt: CMTime?
     private var pausedOffset: CMTime = .zero
+    private var resumedAt: CMTime = .zero
+    private var lastVideoTime: CMTime = .invalid
+    private var captureClock: CMClock = CMClockGetHostTimeClock()
 
-    private static var hostNow: CMTime { CMClockGetTime(CMClockGetHostTimeClock()) }
+    private var clockNow: CMTime { CMClockGetTime(captureClock) }
 
     // GIF streaming. `gifWriter` is set before the stream starts and cleared
     // after it stops, so the sample queue never races its assignment.
@@ -166,6 +173,8 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         lastGIFCapture = .negativeInfinity
         pausedOffset = .zero
         pausedAt = nil
+        resumedAt = .zero
+        lastVideoTime = .invalid
         sessionStarted = false
 
         let fps = Double(Settings.string(format == .gif ? SettingsKey.gifFPS : SettingsKey.videoFPS, default: format == .gif ? "15" : "60")) ?? 30
@@ -221,6 +230,8 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         let filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        // Set before capture starts, so no sample handler is reading it yet.
+        captureClock = stream.synchronizationClock ?? CMClockGetHostTimeClock()
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         if wantsAudio {
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
@@ -316,13 +327,15 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
     public func togglePause() {
         guard isRecording else { return }
         queue.sync {
-            if isPaused {
+            if pausedAt != nil {
+                let now = clockNow
                 if let pausedAt {
-                    pausedOffset = CMTimeAdd(pausedOffset, CMTimeSubtract(Self.hostNow, pausedAt))
+                    pausedOffset = CMTimeAdd(pausedOffset, CMTimeSubtract(now, pausedAt))
                 }
                 pausedAt = nil
+                resumedAt = now
             } else {
-                pausedAt = Self.hostNow
+                pausedAt = clockNow
             }
         }
         isPaused.toggle()
@@ -407,7 +420,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         self.gifWriter = nil
         // The recording ends now (or when it was paused), on the frames' clock,
         // so a still stretch before Stop keeps its length.
-        let end = queue.sync { CMTimeGetSeconds(CMTimeSubtract(pausedAt ?? Self.hostNow, pausedOffset)) }
+        let end = queue.sync { CMTimeGetSeconds(CMTimeSubtract(pausedAt ?? clockNow, pausedOffset)) }
         // Waits for at most `maxBacklog` queued frames, then writes the trailer.
         let written = gifWriter.finish(keep: true, endingAt: end)
         let dropped = gifWriter.dropped
@@ -449,7 +462,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
             return
         }
 
-        guard !isPaused else { return }
+        guard isLive(sampleBuffer) else { return }
 
         switch format {
         case .gif:
@@ -463,6 +476,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
         guard let writer, let videoInput else { return }
 
         let presentationTime = CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), pausedOffset)
+        if lastVideoTime.isValid, CMTimeCompare(presentationTime, lastVideoTime) <= 0 { return }
 
         if !sessionStarted {
             writer.startSession(atSourceTime: presentationTime)
@@ -487,20 +501,47 @@ public final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, S
             sampleBufferOut: &adjusted
         )
 
-        if status == noErr, let adjusted {
-            videoInput.append(adjusted)
-        } else {
-            videoInput.append(sampleBuffer)
-        }
+        // Appending the original stamp would put this frame out of order.
+        guard status == noErr, let adjusted else { return }
+        if videoInput.append(adjusted) { lastVideoTime = presentationTime }
+    }
+
+    /// False while paused, and for samples captured before the last resume
+    /// but delivered after it. Runs on `queue`.
+    private func isLive(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard pausedAt == nil else { return false }
+        return CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), resumedAt) >= 0
     }
 
     private func appendAudioSample(_ sampleBuffer: CMSampleBuffer) {
         guard sessionStarted, let audioInput, audioInput.isReadyForMoreMediaData else { return }
-        audioInput.append(sampleBuffer)
+        guard pausedOffset != .zero else {
+            audioInput.append(sampleBuffer)
+            return
+        }
+        // Re-stamp like video, so audio stays in sync after a pause.
+        var count: CMItemCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(sampleBuffer, entryCount: 0, arrayToFill: nil,
+                                                     entriesNeededOut: &count) == noErr, count > 0 else { return }
+        var timing = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: count)
+        guard CMSampleBufferGetSampleTimingInfoArray(sampleBuffer, entryCount: count, arrayToFill: &timing,
+                                                     entriesNeededOut: &count) == noErr else { return }
+        for index in timing.indices {
+            timing[index].presentationTimeStamp = CMTimeSubtract(timing[index].presentationTimeStamp, pausedOffset)
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeSubtract(timing[index].decodeTimeStamp, pausedOffset)
+            }
+        }
+        var adjusted: CMSampleBuffer?
+        guard CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault, sampleBuffer: sampleBuffer,
+                                                    sampleTimingEntryCount: count, sampleTimingArray: &timing,
+                                                    sampleBufferOut: &adjusted) == noErr,
+              let adjusted else { return }
+        audioInput.append(adjusted)
     }
 
     private func handleAudio(_ sampleBuffer: CMSampleBuffer) {
-        guard !isPaused else { return }
+        guard isLive(sampleBuffer) else { return }
         appendAudioSample(sampleBuffer)
     }
 

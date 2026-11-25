@@ -16,6 +16,12 @@ PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$PACKAGE_DIR/../../.." && pwd)"
 APP_DIR="$PACKAGE_DIR/build/PixCap.app"
 
+# A release build refuses to package a notices file that no longer matches the
+# dependencies; regenerate it with scripts/notices.sh. scripts/gate.sh runs the same check.
+if [ "$CONFIG" = "release" ]; then
+    "$REPO_ROOT/scripts/notices.sh" --check
+fi
+
 echo "▸ Building Rust core ($CONFIG)…"
 if [ "$CONFIG" = "release" ]; then
     (cd "$REPO_ROOT" && cargo build --release)
@@ -62,12 +68,8 @@ if [ ! -f "$ICON" ]; then
 fi
 cp "$ICON" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
-# Licence and third-party notices ship inside the app (§4). A release build refuses
-# to package a notices file that no longer matches the dependencies; regenerate it
-# with scripts/notices.sh. scripts/gate.sh runs the same check.
-if [ "$CONFIG" = "release" ]; then
-    "$REPO_ROOT/scripts/notices.sh" --check
-fi
+# Licence and third-party notices ship inside the app (§4); the release-build check
+# for them runs before the build, near the top of this script.
 cp "$REPO_ROOT/LICENSE" "$APP_DIR/Contents/Resources/LICENSE.txt"
 cp "$REPO_ROOT/THIRD-PARTY-NOTICES.txt" "$APP_DIR/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 

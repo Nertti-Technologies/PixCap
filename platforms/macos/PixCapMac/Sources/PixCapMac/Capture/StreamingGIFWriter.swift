@@ -101,7 +101,9 @@ final class StreamingGIFWriter {
         lock.lock()
         var last: (rgba: Data, delay: UInt32)?
         if keep, let frame = held, let origin {
-            let shownUntil = max(end ?? 0, frame.time + frameDelay)
+            // A NaN `end` (invalid clock reading) falls back to one frame interval.
+            let stop = end.flatMap { $0.isFinite ? $0 : nil } ?? 0
+            let shownUntil = max(stop, frame.time + frameDelay)
             last = (frame.rgba, delayUntil(shownUntil - origin))
             pending += 1
         }
